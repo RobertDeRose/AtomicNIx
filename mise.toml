@@ -1,0 +1,19 @@
+# schema
+[settings]
+experimental = true
+env_shell_expand = true
+
+[tools]
+actionlint = "latest"
+"github:RobertDeRose/nixfmt" = "latest"
+hk = "1.41"
+pkl = "latest"
+shellcheck = "latest"
+shfmt = "latest"
+tombi = "latest"
+
+[env]
+HK_MISE = 1
+
+[hooks]
+postinstall = "hk install --mise"
