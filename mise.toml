@@ -54,6 +54,7 @@ depends = [
   "e2e:rauc-rollback",
   "e2e:rauc-confirm",
   "e2e:rauc-power-loss",
+  "e2e:rauc-watchdog",
   "e2e:firewall",
   "e2e:network-isolation",
   "e2e:ssh-wan-toggle",
