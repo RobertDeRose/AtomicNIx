@@ -16,13 +16,23 @@ local linters = new Mapping<String, Step> {
   ["mise-fmt"] = Builtins.mise
   ["mise"] = Builtins.mise
   ["mixed-line-ending"] = Builtins.mixed_line_ending
+  ["rumdl"] = (Builtins.rumdl) {
+    check_diff = "rumdl check --config .config/rumdl.toml --diff {{ files }}"
+    fix = "rumdl check --config .config/rumdl.toml --fix {{ files }}"
+  }
   ["newlines"] = Builtins.newlines
   ["nixfmt"] = Builtins.nix_fmt
   ["pkl_format"] = Builtins.pkl_format
+  ["mktoc"] = new Step {
+    glob = List("**/*.md", "**/*.markdown")
+    check_diff = "for file in {{ files }}; do mktoc \"$file\" >/dev/null; done"
+    fix = "for file in {{ files }}; do mktoc \"$file\" >/dev/null; done"
+  }
   ["shellcheck"] = Builtins.shellcheck
   ["shfmt"] = Builtins.shfmt
   ["tombi_format"] = Builtins.tombi_format
   ["tombi"] = Builtins.tombi
+  ["typos"] = Builtins.typos
   ["trailing-whitespace"] = Builtins.trailing_whitespace
 }
 

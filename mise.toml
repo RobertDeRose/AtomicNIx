@@ -5,9 +5,11 @@ env_shell_expand = true
 
 [tools]
 actionlint = "latest"
+"github:KevinGimbel/mktoc" = "latest"
 "github:RobertDeRose/nixfmt" = "latest"
 hk = "1.41"
 pkl = "latest"
+rumdl = "latest"
 shellcheck = "latest"
 shfmt = "latest"
 tombi = "latest"
@@ -21,23 +23,23 @@ postinstall = "hk install --mise"
 # ── Tasks ──────────────────────────────────────────────────────────────────────
 
 [tasks.check]
-description = "Verify flake evaluates cleanly"
+description = "Verify flake evaluates cleanly (nix flake check)"
 run = "nix flake check"
 
 [tasks."build:squashfs"]
-description = "Build the squashfs root filesystem image"
+description = "Build squashfs rootfs (nix build .#squashfs -o result-squashfs)"
 run = "nix build .#squashfs -o result-squashfs"
 
 [tasks."build:rauc-bundle"]
-description = "Build the signed RAUC bundle (boot + rootfs)"
+description = "Build signed RAUC bundle (nix build .#rauc-bundle -o result-rauc-bundle)"
 run = "nix build .#rauc-bundle -o result-rauc-bundle"
 
 [tasks."build:boot-script"]
-description = "Build the U-Boot boot script"
+description = "Build U-Boot boot script (nix build .#boot-script -o result-boot-script)"
 run = "nix build .#boot-script -o result-boot-script"
 
 [tasks."build:image"]
-description = "Build the flashable eMMC disk image"
+description = "Build flashable disk image (nix build .#image -o result-image)"
 run = "nix build .#image -o result-image"
 
 [tasks.build]
