@@ -45,3 +45,12 @@ run = "nix build .#image -o result-image"
 [tasks.build]
 description = "Build all image artifacts"
 depends = ["build:*"]
+
+[tasks.e2e]
+description = "Run all E2E integration tests"
+depends = [
+  "e2e:rauc-slots",
+  "e2e:rauc-update",
+  "e2e:rauc-rollback",
+  "e2e:rauc-confirm",
+]
