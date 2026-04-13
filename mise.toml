@@ -13,6 +13,7 @@ rumdl = "latest"
 shellcheck = "latest"
 shfmt = "latest"
 tombi = "latest"
+typos = "latest"
 
 [env]
 HK_MISE = 1
