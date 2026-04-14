@@ -13,9 +13,13 @@ local linters = new Mapping<String, Step> {
   ["detect-private-key"] = (Builtins.detect_private_key) {
     exclude = List("certs/dev.*.key.pem")
   }
-  ["mise-fmt"] = Builtins.mise
   ["mise"] = Builtins.mise
   ["mixed-line-ending"] = Builtins.mixed_line_ending
+  ["markdown-table-formatter"] = new Step {
+    glob = List("**/*.md", "**/*.markdown")
+    check_diff = "markdown-table-formatter --check {{ files }}"
+    fix = "markdown-table-formatter {{ files }}"
+  }
   ["rumdl"] = (Builtins.rumdl) {
     check_diff = "rumdl check --config .config/rumdl.toml --diff {{ files }}"
     fix = "rumdl check --config .config/rumdl.toml --fix {{ files }}"
