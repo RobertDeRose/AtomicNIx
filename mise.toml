@@ -31,21 +31,87 @@ postinstall = "hk install --mise"
 description = "Verify flake evaluates cleanly (nix flake check)"
 run = "nix flake check"
 
+[tasks._lima]
+description = "Ensure Lima VM is running (hidden helper)"
+hide = true
+usage = 'arg "<vm>" help="Lima VM instance name" default="default"'
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+if ! command -v limactl &>/dev/null; then
+  echo "ERROR: limactl not found. Install Lima: https://lima-vm.io/"
+  exit 1
+fi
+limactl start "${usage_vm}" 2>/dev/null || true
+"""
+
 [tasks."build:squashfs"]
-description = "Build squashfs rootfs (nix build .#squashfs -o result-squashfs)"
-run = "nix build .#squashfs -o result-squashfs"
+description = "Build squashfs rootfs"
+usage = """
+flag "--lima" help="Build inside a Lima VM"
+flag "--vm <name>" help="Lima VM instance name" default="default"
+"""
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cmd=()
+if [ "${usage_lima:-false}" = "true" ]; then
+  mise run _lima "${usage_vm}"
+  cmd+=(limactl shell "${usage_vm}" --)
+fi
+"${cmd[@]}" nix build .#squashfs -o result-squashfs
+"""
 
 [tasks."build:rauc-bundle"]
-description = "Build signed RAUC bundle (nix build .#rauc-bundle -o result-rauc-bundle)"
-run = "nix build .#rauc-bundle -o result-rauc-bundle"
+description = "Build signed RAUC bundle"
+usage = """
+flag "--lima" help="Build inside a Lima VM"
+flag "--vm <name>" help="Lima VM instance name" default="default"
+"""
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cmd=()
+if [ "${usage_lima:-false}" = "true" ]; then
+  mise run _lima "${usage_vm}"
+  cmd+=(limactl shell "${usage_vm}" --)
+fi
+"${cmd[@]}" nix build .#rauc-bundle -o result-rauc-bundle
+"""
 
 [tasks."build:boot-script"]
-description = "Build U-Boot boot script (nix build .#boot-script -o result-boot-script)"
-run = "nix build .#boot-script -o result-boot-script"
+description = "Build U-Boot boot script"
+usage = """
+flag "--lima" help="Build inside a Lima VM"
+flag "--vm <name>" help="Lima VM instance name" default="default"
+"""
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cmd=()
+if [ "${usage_lima:-false}" = "true" ]; then
+  mise run _lima "${usage_vm}"
+  cmd+=(limactl shell "${usage_vm}" --)
+fi
+"${cmd[@]}" nix build .#boot-script -o result-boot-script
+"""
 
 [tasks."build:image"]
-description = "Build flashable disk image (nix build .#image -o result-image)"
-run = "nix build .#image -o result-image"
+description = "Build flashable disk image"
+usage = """
+flag "--lima" help="Build inside a Lima VM"
+flag "--vm <name>" help="Lima VM instance name" default="default"
+"""
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cmd=()
+if [ "${usage_lima:-false}" = "true" ]; then
+  mise run _lima "${usage_vm}"
+  cmd+=(limactl shell "${usage_vm}" --)
+fi
+"${cmd[@]}" nix build .#image -o result-image
+"""
 
 [tasks.build]
 description = "Build all image artifacts"
