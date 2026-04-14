@@ -32,6 +32,11 @@ local linters = new Mapping<String, Step> {
   ["shfmt"] = Builtins.shfmt
   ["tombi_format"] = Builtins.tombi_format
   ["tombi"] = Builtins.tombi
+  ["mdbook-lint"] = new Step {
+    glob = List("docs/src/**/*.md")
+    check_diff = "mdbook-lint lint --config .mdbook-lint.toml {{ files }}"
+    fix = "mdbook-lint fix --config .mdbook-lint.toml {{ files }}"
+  }
   ["typos"] = Builtins.typos
   ["trailing-whitespace"] = Builtins.trailing_whitespace
 }
