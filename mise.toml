@@ -101,16 +101,25 @@ description = "Build flashable disk image"
 usage = """
 flag "--lima" help="Build inside a Lima VM"
 flag "--vm <name>" help="Lima VM instance name" default="default"
+flag "-o --output <path>" help="Copy .img to this path (default: cwd)"
 """
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
 cmd=()
+cpcmd=()
 if [ "${usage_lima:-false}" = "true" ]; then
   mise run _lima "${usage_vm}"
   cmd+=(limactl shell "${usage_vm}" --)
+  cpcmd+=(limactl shell "${usage_vm}" --)
 fi
-"${cmd[@]}" nix build .#image -o result-image
+OUT=$("${cmd[@]}" nix build .#image --no-link --print-out-paths)
+IMG=$("${cmd[@]}" find "$OUT" -name '*.img' -print -quit)
+DEST="${usage_output:-$(basename "$IMG")}"
+"${cpcmd[@]}" cp "$IMG" "$PWD/$DEST"
+SIZE=$(stat -c%s "$DEST" 2>/dev/null || stat -f%z "$DEST")
+echo ""
+echo "Image: $DEST ($((SIZE / 1024 / 1024)) MiB)"
 """
 
 [tasks.build]
