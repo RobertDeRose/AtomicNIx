@@ -123,8 +123,22 @@ echo "Image: $DEST ($((SIZE / 1024 / 1024)) MiB)"
 """
 
 [tasks.build]
-description = "Build all image artifacts"
-depends = ["build:*"]
+description = "Build all image artifacts in a single nix invocation"
+usage = """
+flag "--lima" help="Build inside a Lima VM"
+flag "--vm <name>" help="Lima VM instance name" default="default"
+"""
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cmd=()
+if [ "${usage_lima:-false}" = "true" ]; then
+  mise run _lima "${usage_vm}"
+  cmd+=(limactl shell "${usage_vm}" --)
+fi
+"${cmd[@]}" nix build .#squashfs .#rauc-bundle .#boot-script .#image --no-link
+echo "All artifacts built."
+"""
 
 [tasks.e2e]
 description = "Run all E2E integration tests"
