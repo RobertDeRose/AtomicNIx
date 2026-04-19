@@ -96,8 +96,8 @@ fi
 "${cmd[@]}" nix build .#boot-script -o result-boot-script
 """
 
-[tasks."build:image"]
-description = "Build flashable disk image"
+[tasks.build]
+description = "Build all artifacts and copy flashable image to cwd"
 usage = """
 flag "--lima" help="Build inside a Lima VM"
 flag "--vm <name>" help="Lima VM instance name" default="default"
@@ -107,37 +107,18 @@ run = """
 #!/usr/bin/env bash
 set -euo pipefail
 cmd=()
-cpcmd=()
 if [ "${usage_lima:-false}" = "true" ]; then
   mise run _lima "${usage_vm}"
   cmd+=(limactl shell "${usage_vm}" --)
-  cpcmd+=(limactl shell "${usage_vm}" --)
 fi
-OUT=$("${cmd[@]}" nix build .#image --no-link --print-out-paths)
-IMG=$("${cmd[@]}" find "$OUT" -name '*.img' -print -quit)
+OUT=$("${cmd[@]}" nix build .#squashfs .#rauc-bundle .#boot-script .#image --no-link --print-out-paths)
+IMG=$("${cmd[@]}" find $OUT -name '*.img' -print -quit)
 DEST="${usage_output:-$(basename "$IMG")}"
-"${cpcmd[@]}" cp "$IMG" "$PWD/$DEST"
+"${cmd[@]}" cp "$IMG" "$PWD/$DEST"
+chmod u+w "$PWD/$DEST"
 SIZE=$(stat -c%s "$DEST" 2>/dev/null || stat -f%z "$DEST")
 echo ""
 echo "Image: $DEST ($((SIZE / 1024 / 1024)) MiB)"
-"""
-
-[tasks.build]
-description = "Build all image artifacts in a single nix invocation"
-usage = """
-flag "--lima" help="Build inside a Lima VM"
-flag "--vm <name>" help="Lima VM instance name" default="default"
-"""
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-cmd=()
-if [ "${usage_lima:-false}" = "true" ]; then
-  mise run _lima "${usage_vm}"
-  cmd+=(limactl shell "${usage_vm}" --)
-fi
-"${cmd[@]}" nix build .#squashfs .#rauc-bundle .#boot-script .#image --no-link
-echo "All artifacts built."
 """
 
 [tasks.e2e]
