@@ -5,6 +5,7 @@
   networking.firewall.enable = false;
 
   atomicnix.rauc = {
+    enable = true;
     slots = {
       boot0 = "/dev/vdb";
       boot1 = "/dev/vdc";
