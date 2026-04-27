@@ -33,3 +33,6 @@ book/
 # AI Agents
 .opencode
 bkup/
+
+# AtomicNix files
+config.toml

@@ -46,6 +46,7 @@ local linters = new Mapping<String, Step> {
 }
 
 default_branch = "main"
+exclude = List("**/mermaid.min.js")
 fail_fast = false
 
 hooks {
