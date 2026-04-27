@@ -124,52 +124,6 @@ echo ""
 echo "Image: $DEST ($((SIZE / 1024 / 1024)) MiB)"
 """
 
-[tasks."admin:pass"]
-description = "Write a local development admin password hash to .local/admin-password-hash"
-interactive = true
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-
-upsert_env_var() {
-  local key="$1"
-  local value="$2"
-
-  touch .env
-  if grep -q "^${key}=" .env 2>/dev/null; then
-    perl -0pi -e 's/^'"${key}"'=.*$/'"${key}"'='"${value}"'/m' .env
-  else
-    printf '%s=%s\n' "$key" "$value" >> .env
-  fi
-}
-
-read -rsp "Development admin password: " PASSWORD
-echo
-read -rsp "Confirm password: " PASSWORD_CONFIRM
-echo
-
-if [ -z "$PASSWORD" ]; then
-  echo "ERROR: Password cannot be empty" >&2
-  exit 1
-fi
-
-if [ "$PASSWORD" != "$PASSWORD_CONFIRM" ]; then
-  echo "ERROR: Passwords did not match" >&2
-  exit 1
-fi
-
-mkdir -p .local
-HASH=$(openssl passwd -6 "$PASSWORD")
-printf '%s\n' "$HASH" > .local/admin-password-hash
-chmod 600 .local/admin-password-hash
-
-upsert_env_var DEVELOPMENT 1
-upsert_env_var ADMIN_PASSWORD_HASH_FILE .local/admin-password-hash
-
-echo "Wrote development password hash to .local/admin-password-hash"
-echo "Updated .env with DEVELOPMENT=1 and ADMIN_PASSWORD_HASH_FILE=.local/admin-password-hash"
-"""
-
 [tasks.e2e]
 description = "Run all E2E integration tests"
 usage = """
