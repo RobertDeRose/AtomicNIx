@@ -99,7 +99,7 @@ fi
 """
 
 [tasks.build]
-description = "Build artifacts, keep latest kernel/U-Boot, rotate last 2 images"
+description = "Build artifacts and retain the last 2 distinct images"
 usage = """
 flag "--lima" help="Build inside a Lima VM"
 flag "--vm <name>" help="Lima VM instance name" default="default"
@@ -126,10 +126,21 @@ BUNDLEROOT="$GCROOTS/bundles"
 "${cmd[@]}" nix build .#uboot -o "$GCROOTS/uboot"
 "${cmd[@]}" nix build .#uboot-env-tools -o "$GCROOTS/uboot-env-tools"
 
-"${cmd[@]}" rm -f "$IMGROOT/image.2"
-"${cmd[@]}" test ! -L "$IMGROOT/image.1" || mv "$IMGROOT/image.1" "$IMGROOT/image.2"
+prev_image_target=""
+if [ -L "$IMGROOT/image.1" ]; then
+  prev_image_target=$(readlink "$IMGROOT/image.1")
+fi
+
+"${cmd[@]}" nix build .#image -o "$IMGROOT/image.1.new"
+new_image_target=$(readlink "$IMGROOT/image.1.new")
+
+if [ -n "$prev_image_target" ] && [ "$prev_image_target" != "$new_image_target" ]; then
+  "${cmd[@]}" rm -f "$IMGROOT/image.2"
+  "${cmd[@]}" mv "$IMGROOT/image.1" "$IMGROOT/image.2"
+fi
+
 "${cmd[@]}" rm -f "$IMGROOT/image.1"
-"${cmd[@]}" nix build .#image -o "$IMGROOT/image.1"
+"${cmd[@]}" mv "$IMGROOT/image.1.new" "$IMGROOT/image.1"
 
 "${cmd[@]}" rm -f "$BUNDLEROOT/rauc-bundle.2"
 "${cmd[@]}" test ! -L "$BUNDLEROOT/rauc-bundle.1" || mv "$BUNDLEROOT/rauc-bundle.1" "$BUNDLEROOT/rauc-bundle.2"
@@ -137,12 +148,19 @@ BUNDLEROOT="$GCROOTS/bundles"
 "${cmd[@]}" nix build .#rauc-bundle -o "$BUNDLEROOT/rauc-bundle.1"
 
 IMG=$("${cmd[@]}" sh -c 'set -- "$1"/*.img; [ -e "$1" ] && printf "%s\n" "$1"' _ "$IMGROOT/image.1")
-DEST="${usage_output:-$(basename "$IMG")}"
-"${cmd[@]}" cp "$IMG" "$PWD/$DEST"
-chmod u+w "$PWD/$DEST"
-SIZE=$(stat -c%s "$DEST" 2>/dev/null || stat -f%z "$DEST")
-echo ""
-echo "Image: $DEST ($((SIZE / 1024 / 1024)) MiB)"
+
+if [ -n "${usage_output:-}" ]; then
+  DEST="${usage_output}"
+  "${cmd[@]}" cp "$IMG" "$PWD/$DEST"
+  chmod u+w "$PWD/$DEST"
+  SIZE=$(stat -c%s "$DEST" 2>/dev/null || stat -f%z "$DEST")
+  echo ""
+  echo "Image: $DEST ($((SIZE / 1024 / 1024)) MiB)"
+else
+  SIZE=$(stat -c%s "$IMG" 2>/dev/null || stat -f%z "$IMG")
+  echo ""
+  echo "Image: $IMG ($((SIZE / 1024 / 1024)) MiB)"
+fi
 """
 
 [tasks.gc]
