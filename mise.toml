@@ -99,7 +99,7 @@ fi
 """
 
 [tasks.build]
-description = "Build all artifacts and copy flashable image to cwd"
+description = "Build artifacts, keep latest kernel/U-Boot, rotate last 2 images"
 usage = """
 flag "--lima" help="Build inside a Lima VM"
 flag "--vm <name>" help="Lima VM instance name" default="default"
@@ -114,14 +114,53 @@ if [ "${usage_lima:-false}" = "true" ]; then
   cmd+=(limactl shell "${usage_vm}" --)
 fi
 
-OUT=$("${cmd[@]}" nix build .#squashfs .#rauc-bundle .#boot-script .#image --no-link --print-out-paths)
-IMG=$("${cmd[@]}" find $OUT -name '*.img' -print -quit)
+GCROOTS=.gcroots
+IMGROOT="$GCROOTS/images"
+BUNDLEROOT="$GCROOTS/bundles"
+
+"${cmd[@]}" mkdir -p "$IMGROOT" "$BUNDLEROOT"
+
+"${cmd[@]}" rm -f "$GCROOTS/kernel" "$GCROOTS/toplevel" "$GCROOTS/uboot" "$GCROOTS/uboot-env-tools"
+"${cmd[@]}" nix build .#nixosConfigurations.rock64.config.system.build.kernel -o "$GCROOTS/kernel"
+"${cmd[@]}" nix build .#nixosConfigurations.rock64.config.system.build.toplevel -o "$GCROOTS/toplevel"
+"${cmd[@]}" nix build .#uboot -o "$GCROOTS/uboot"
+"${cmd[@]}" nix build .#uboot-env-tools -o "$GCROOTS/uboot-env-tools"
+
+"${cmd[@]}" rm -f "$IMGROOT/image.2"
+"${cmd[@]}" test ! -L "$IMGROOT/image.1" || mv "$IMGROOT/image.1" "$IMGROOT/image.2"
+"${cmd[@]}" rm -f "$IMGROOT/image.1"
+"${cmd[@]}" nix build .#image -o "$IMGROOT/image.1"
+
+"${cmd[@]}" rm -f "$BUNDLEROOT/rauc-bundle.2"
+"${cmd[@]}" test ! -L "$BUNDLEROOT/rauc-bundle.1" || mv "$BUNDLEROOT/rauc-bundle.1" "$BUNDLEROOT/rauc-bundle.2"
+"${cmd[@]}" rm -f "$BUNDLEROOT/rauc-bundle.1"
+"${cmd[@]}" nix build .#rauc-bundle -o "$BUNDLEROOT/rauc-bundle.1"
+
+IMG=$("${cmd[@]}" sh -c 'set -- "$1"/*.img; [ -e "$1" ] && printf "%s\n" "$1"' _ "$IMGROOT/image.1")
 DEST="${usage_output:-$(basename "$IMG")}"
 "${cmd[@]}" cp "$IMG" "$PWD/$DEST"
 chmod u+w "$PWD/$DEST"
 SIZE=$(stat -c%s "$DEST" 2>/dev/null || stat -f%z "$DEST")
 echo ""
 echo "Image: $DEST ($((SIZE / 1024 / 1024)) MiB)"
+"""
+
+[tasks.gc]
+description = "Garbage collect unrooted Nix store paths"
+usage = """
+flag "--lima" help="Run inside a Lima VM"
+flag "--vm <name>" help="Lima VM instance name" default="default"
+"""
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cmd=()
+if [ "${usage_lima:-false}" = "true" ]; then
+  mise run _lima "${usage_vm}"
+  cmd+=(limactl shell "${usage_vm}" --)
+fi
+
+"${cmd[@]}" nix-collect-garbage -d
 """
 
 [tasks.e2e]
