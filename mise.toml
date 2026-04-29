@@ -142,10 +142,22 @@ fi
 "${cmd[@]}" rm -f "$IMGROOT/image.1"
 "${cmd[@]}" mv "$IMGROOT/image.1.new" "$IMGROOT/image.1"
 
-"${cmd[@]}" rm -f "$BUNDLEROOT/rauc-bundle.2"
-"${cmd[@]}" test ! -L "$BUNDLEROOT/rauc-bundle.1" || mv "$BUNDLEROOT/rauc-bundle.1" "$BUNDLEROOT/rauc-bundle.2"
+prev_bundle_target=""
+if [ -L "$BUNDLEROOT/rauc-bundle.1" ]; then
+  prev_bundle_target=$(readlink "$BUNDLEROOT/rauc-bundle.1")
+fi
+
+"${cmd[@]}" rm -f "$BUNDLEROOT/rauc-bundle.1.new"
+"${cmd[@]}" nix build .#rauc-bundle -o "$BUNDLEROOT/rauc-bundle.1.new"
+new_bundle_target=$(readlink "$BUNDLEROOT/rauc-bundle.1.new")
+
+if [ -n "$prev_bundle_target" ] && [ "$prev_bundle_target" != "$new_bundle_target" ]; then
+  "${cmd[@]}" rm -f "$BUNDLEROOT/rauc-bundle.2"
+  "${cmd[@]}" mv "$BUNDLEROOT/rauc-bundle.1" "$BUNDLEROOT/rauc-bundle.2"
+fi
+
 "${cmd[@]}" rm -f "$BUNDLEROOT/rauc-bundle.1"
-"${cmd[@]}" nix build .#rauc-bundle -o "$BUNDLEROOT/rauc-bundle.1"
+"${cmd[@]}" mv "$BUNDLEROOT/rauc-bundle.1.new" "$BUNDLEROOT/rauc-bundle.1"
 
 IMG=$("${cmd[@]}" sh -c 'set -- "$1"/*.img; [ -e "$1" ] && printf "%s\n" "$1"' _ "$IMGROOT/image.1")
 
