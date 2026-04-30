@@ -163,11 +163,20 @@ IMG=$("${cmd[@]}" sh -c 'set -- "$1"/*.img; [ -e "$1" ] && printf "%s\n" "$1"' _
 
 if [ -n "${usage_output:-}" ]; then
   DEST="${usage_output}"
-  "${cmd[@]}" cp "$IMG" "$PWD/$DEST"
-  chmod u+w "$PWD/$DEST"
-  SIZE=$(stat -c%s "$DEST" 2>/dev/null || stat -f%z "$DEST")
+  if [ "${DEST#/}" != "$DEST" ]; then
+    DEST_PATH="$DEST"
+  else
+    DEST_PATH="$PWD/$DEST"
+  fi
+  if [ "$using_lima" = "true" ]; then
+    "${cmd[@]}" sh -c 'cat "$1"' _ "$IMG" >"$DEST_PATH"
+  else
+    cp "$IMG" "$DEST_PATH"
+  fi
+  chmod u+w "$DEST_PATH"
+  SIZE=$(stat -c%s "$DEST_PATH" 2>/dev/null || stat -f%z "$DEST_PATH")
   echo ""
-  echo "Image: $DEST ($((SIZE / 1024 / 1024)) MiB)"
+  echo "Image: $DEST_PATH ($((SIZE / 1024 / 1024)) MiB)"
 else
   SIZE=$(stat -c%s "$IMG" 2>/dev/null || stat -f%z "$IMG")
   echo ""
