@@ -130,6 +130,7 @@ if [ -L "$IMGROOT/image.1" ]; then
   prev_image_target=$(readlink "$IMGROOT/image.1")
 fi
 
+"${cmd[@]}" rm -f "$IMGROOT/image.1.new"
 "${cmd[@]}" nix build .#image -o "$IMGROOT/image.1.new"
 new_image_target=$(readlink "$IMGROOT/image.1.new")
 
