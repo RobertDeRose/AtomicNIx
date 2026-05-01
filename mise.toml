@@ -108,9 +108,11 @@ run = """
 #!/usr/bin/env bash
 set -euo pipefail
 cmd=()
+using_lima=false
 if [ "${usage_lima:-false}" = "true" ]; then
   mise run _lima "${usage_vm}"
   cmd+=(limactl shell "${usage_vm}" --)
+  using_lima=true
 fi
 
 GCROOTS=.gcroots
@@ -178,7 +180,11 @@ if [ -n "${usage_output:-}" ]; then
   echo ""
   echo "Image: $DEST_PATH ($((SIZE / 1024 / 1024)) MiB)"
 else
-  SIZE=$(stat -c%s "$IMG" 2>/dev/null || stat -f%z "$IMG")
+  if [ "$using_lima" = "true" ]; then
+    SIZE=$("${cmd[@]}" sh -c 'stat -c%s "$1" 2>/dev/null || stat -f%z "$1"' _ "$IMG")
+  else
+    SIZE=$(stat -c%s "$IMG" 2>/dev/null || stat -f%z "$IMG")
+  fi
   echo ""
   echo "Image: $IMG ($((SIZE / 1024 / 1024)) MiB)"
 fi
