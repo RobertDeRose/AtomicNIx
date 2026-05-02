@@ -7,6 +7,12 @@
   ...
 }:
 
+let
+  lanGatewayApply = pkgs.runCommand "lan-gateway-apply" { } ''
+    mkdir -p "$out/bin"
+    install -m0755 ${../scripts/lan-gateway-apply.py} "$out/bin/lan-gateway-apply"
+  '';
+in
 {
   # ── DHCP server via dnsmasq ──────────────────────────────────────────────────
 
@@ -17,18 +23,7 @@
       interface = "eth1";
       bind-dynamic = true; # Wait for eth1 to appear (unlike bind-interfaces which fails immediately)
 
-      # DHCP pool
-      dhcp-range = "172.20.30.10,172.20.30.254,255.255.255.0,24h";
-
-      # Gateway is the Rock64 itself
-      dhcp-option = [
-        "3,172.20.30.1" # Default gateway
-        "6" # Empty DNS — no DNS for LAN devices
-        "42,172.20.30.1" # NTP server
-      ];
-
-      # No DNS forwarding — LAN devices don't need internet DNS
-      port = 0; # Disable DNS server in dnsmasq
+      conf-file = "/etc/dnsmasq.d/atomicnix-lan.conf";
 
       # Logging
       log-dhcp = true;
@@ -43,8 +38,11 @@
       # Sync from upstream NTP servers (via WAN / eth0)
       pool pool.ntp.org iburst
 
-      # Serve time to LAN devices on 172.20.30.0/24
-      allow 172.20.30.0/24
+      # Step large RTC drift whenever upstream time becomes available.
+      makestep 1.0 -1
+
+      # Serve time to LAN devices from the applied LAN config.
+      include /etc/atomicnix/chrony-lan.conf
 
       # Deny all other clients
       deny all
@@ -53,5 +51,54 @@
       # (using our own clock as fallback)
       local stratum 10
     '';
+  };
+
+  environment.etc."systemd/network/20-lan.network.d/50-atomicnix.conf".text = ''
+    [Network]
+    Address=172.20.30.1/24
+  '';
+
+  environment.etc."dnsmasq.d/atomicnix-lan.conf".text = ''
+    dhcp-range=172.20.30.10,172.20.30.254,255.255.255.0,24h
+    dhcp-option=3,172.20.30.1
+    dhcp-option=6,172.20.30.1
+    dhcp-option=42,172.20.30.1
+    domain=local
+    expand-hosts
+    addn-hosts=/etc/atomicnix/dnsmasq-hosts
+    port=53
+  '';
+
+  environment.etc."atomicnix/dnsmasq-hosts".text = ''
+    172.20.30.1 atomicnix atomicnix.local
+  '';
+
+  environment.etc."atomicnix/chrony-lan.conf".text = ''
+    # Managed at runtime by lan-gateway-apply.
+    allow 172.20.30.0/24
+  '';
+
+  systemd.services.lan-gateway-apply = {
+    description = "Apply provisioned LAN gateway settings";
+    after = [ "data.mount" ];
+    wants = [ "data.mount" ];
+    wantedBy = [ "multi-user.target" ];
+
+    unitConfig = {
+      ConditionPathExists = "/data/config/lan-settings.json";
+      RequiresMountsFor = [ "/data" ];
+    };
+
+    path = [
+      pkgs.coreutils
+      pkgs.iproute2
+      pkgs.python3Minimal
+      pkgs.systemd
+    ];
+
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = "${lanGatewayApply}/bin/lan-gateway-apply";
+    };
   };
 }

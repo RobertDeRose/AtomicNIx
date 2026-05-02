@@ -2,7 +2,8 @@
 # Validates device-local gateway services before committing the RAUC slot.
 #
 # Only runs AFTER the first boot (when /data/.completed_first_boot exists).
-# On first boot, first-boot.service marks the slot good unconditionally.
+# On first boot, first-boot.service handles provisioning and marks the slot
+# good only when RAUC is enabled.
 {
   config,
   lib,
@@ -11,6 +12,7 @@
 }:
 
 let
+  cfg = config.atomicnix.rauc;
   verificationScript = pkgs.writeShellScript "os-verification" (
     builtins.readFile ../scripts/os-verification.sh
   );
@@ -18,7 +20,7 @@ in
 {
   # ── os-verification.service ─────────────────────────────────────────────────
 
-  systemd.services.os-verification = {
+  systemd.services.os-verification = lib.mkIf cfg.enable {
     description = "OS update verification - local health check";
     after = [
       "data.mount"
@@ -35,7 +37,6 @@ in
     path = [
       pkgs.rauc
       pkgs.jq
-      pkgs.python3Minimal
       pkgs.systemd
       pkgs.iproute2
       pkgs.coreutils

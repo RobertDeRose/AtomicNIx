@@ -163,31 +163,27 @@ the device is offline or on the LAN. SSH key-only prevents brute-force attacks o
 
 **Result**: Approximately 27% reduction in closure size compared to a default NixOS system with the same services.
 
-## Decision 17: Three-tier logging model
+## Decision 17: Two-tier runtime logging model
 
-**Choice**: Use a three-tier logging model: a slot-local forensic ring on each boot partition for critical lifecycle
-events, tmpfs-first journald during runtime for general host and container logs, and an `rsyslog` RAM queue that appends
-buffered logs to `/data/logs` for richer diagnostics.
+**Choice**: Use tmpfs-first `journald` during runtime for host and container log ingress, then drain it through an
+`rsyslog` RAM queue that appends buffered logs to `/data/logs`.
 
-**Rationale**: Making the full journal always persistent would increase steady-state eMMC wear and still would not tie
-forensics to the exact boot slot involved in an update or rollback. A dedicated Tier 0 ring under `/boot/forensics`
-keeps the most important records with the slot they describe, survives reboot and slot changes, and remains bounded to
-`28 MiB` per boot slot. The rest of the system stays memory-first during runtime: journald uses volatile storage with a
-runtime cap, Podman logs to journald by default, and `rsyslog` drains journald into a RAM-backed queue before appending
-larger batches to `/data/logs` during runtime and orderly shutdown.
+**Rationale**: Making the full journal always persistent would increase steady-state eMMC wear. The selected design keeps
+runtime logging memory-first, caps journal memory use, routes Podman logs through the same path, and still retains
+broader diagnostics durably on `/data/logs` in larger sequential batches instead of many small writes.
 
-**Trade-off**: Tier 0 is intentionally not a complete journal. Operators get durable markers for boot progression,
-update/install/confirm flows, rollback triggers, and shutdown, while the richer general journal follows a bounded-loss
-model rather than an always-durable one.
+**Trade-off**: This is a bounded-loss durability model rather than an always-durable one. Sudden power loss can still
+drop the newest in-memory journal or rsyslog queue entries, but routine runtime writes remain much friendlier to eMMC
+than fully persistent journal storage.
 
 ## Risks and Trade-offs
 
-| Risk                              | Mitigation                                                                                            |
-|-----------------------------------|-------------------------------------------------------------------------------------------------------|
-| eMMC wear from frequent writes    | `/data` uses f2fs (wear-leveling aware); squashfs slots are written only during updates               |
-| U-Boot env corruption             | Redundant environment storage at two offsets; power-loss safe                                         |
-| 1 GB rootfs slot too small        | Current closure is ~300-400 MB; aggressive optimization keeps headroom                                |
-| Missing health manifest           | `first-boot.service` unconditionally commits; `os-verification` skips container checks if no manifest |
-| Cockpit/Traefik container failure | OpenVPN in rootfs provides alternate remote access                                                    |
-| No delta updates                  | Full-image updates are ~300 MB; acceptable on broadband WAN connections                               |
-| No automatic WAN SSH              | Deliberate security constraint; manual flag file required                                             |
+| Risk                              | Mitigation                                                                                                      |
+|-----------------------------------|-----------------------------------------------------------------------------------------------------------------|
+| eMMC wear from frequent writes    | `/data` uses f2fs (wear-leveling aware); squashfs slots are written only during updates                         |
+| U-Boot env corruption             | Single-copy environment storage; corruption is handled through normal recovery and reprovisioning flows         |
+| 1 GB rootfs slot too small        | Current closure is ~300-400 MB; aggressive optimization keeps headroom                                          |
+| Missing health manifest           | `first-boot.service` commits only when RAUC is enabled; `os-verification` skips container checks if no manifest |
+| Cockpit/Traefik container failure | OpenVPN in rootfs provides alternate remote access                                                              |
+| No delta updates                  | Full-image updates are ~300 MB; acceptable on broadband WAN connections                                         |
+| No automatic WAN SSH              | Deliberate security constraint; manual flag file required                                                       |

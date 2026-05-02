@@ -20,22 +20,15 @@ run_as_appsvc() {
 	uid="$(appsvc_uid)"
 	local runtime_dir="/run/user/$uid"
 	local bus_address="unix:path=$runtime_dir/bus"
-	local path="/run/wrappers/bin:/run/current-system/sw/bin:$PATH"
+	local path="/run/wrappers/bin:/run/current-system/sw/bin"
+	if [ "${ATOMICNIX_ALLOW_UNSAFE_PATH:-0}" = "1" ] && [ -n "${PATH:-}" ]; then
+		path="$PATH:$path"
+	fi
 	runuser -u "$APP_RUNTIME_USER" -- "$APP_RUNTIME_SHELL" -c "HOME=\"$APP_RUNTIME_HOME\" PATH=\"$path\" XDG_RUNTIME_DIR=\"$runtime_dir\" DBUS_SESSION_BUS_ADDRESS=\"$bus_address\" $*"
 }
 
 has_rootless_units() {
-	python3 - <<'PY'
-import json
-from pathlib import Path
-
-path = Path("/data/config/quadlet-runtime.json")
-data = json.loads(path.read_text())
-for unit in data.get("units", []):
-    if unit.get("mode") == "rootless":
-        raise SystemExit(0)
-raise SystemExit(1)
-PY
+	jq -e 'any(.units[]?; .mode == "rootless")' "$RUNTIME_METADATA_FILE" >/dev/null
 }
 
 prepare_rootless_runtime() {
@@ -50,18 +43,7 @@ prepare_rootless_runtime() {
 
 list_units_by_mode() {
 	local mode="$1"
-	python3 - "$mode" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-mode = sys.argv[1]
-path = Path("/data/config/quadlet-runtime.json")
-data = json.loads(path.read_text())
-for unit in data.get("units", []):
-    if unit.get("mode") == mode and unit.get("service"):
-        print(unit["service"])
-PY
+	jq -r --arg mode "$mode" '.units[]? | select(.mode == $mode and (.service // "") != "") | .service' "$RUNTIME_METADATA_FILE"
 }
 
 if [ ! -f "$CONFIG_ROOT/config.toml" ]; then
@@ -108,6 +90,6 @@ if has_rootless_units; then
 fi
 
 if [ "${#failed_units[@]}" -gt 0 ]; then
-	log "Units failed: ${failed_units[*]}"
-	exit 1
+	log "WARNING: units failed to start after sync: ${failed_units[*]}"
+	log "WARNING: continuing so the provisioned system remains debuggable"
 fi

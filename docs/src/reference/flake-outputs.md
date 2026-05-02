@@ -17,12 +17,14 @@ configuration (kernel drivers, device paths, boot method).
 All packages target `aarch64-linux`. An `aarch64-darwin` alias is provided so that `nix build .#image` works directly
 from macOS when a linux-builder is available (the alias points to the same `aarch64-linux` package set):
 
-| Output                               | Description                                                     |
-|--------------------------------------|-----------------------------------------------------------------|
-| `packages.aarch64-linux.squashfs`    | Compressed squashfs root filesystem (~300-400 MB)               |
-| `packages.aarch64-linux.rauc-bundle` | Signed multi-slot `.raucb` bundle for OTA updates               |
-| `packages.aarch64-linux.boot-script` | Compiled U-Boot `boot.scr`                                      |
-| `packages.aarch64-linux.image`       | Flashable eMMC disk image (U-Boot + boot-a + rootfs-a, ~1.2 GB) |
+| Output                                   | Description                                                       |
+|------------------------------------------|-------------------------------------------------------------------|
+| `packages.aarch64-linux.squashfs`        | Compressed squashfs root filesystem (~300-400 MB)                 |
+| `packages.aarch64-linux.rauc-bundle`     | Signed multi-slot `.raucb` bundle for OTA updates                 |
+| `packages.aarch64-linux.boot-script`     | Compiled U-Boot `boot.scr`                                        |
+| `packages.aarch64-linux.uboot`           | Custom Rock64 U-Boot package providing the bootloader artifacts   |
+| `packages.aarch64-linux.uboot-env-tools` | `fw_printenv` / `fw_setenv` binaries used with the Rock64 SPI env |
+| `packages.aarch64-linux.image`           | Flashable eMMC disk image (U-Boot + boot-a + rootfs-a, ~1.2 GB)   |
 
 ## Apps
 
@@ -40,7 +42,8 @@ Tests are available for both Linux and macOS:
 | `checks.aarch64-darwin.*` | Same tests running natively on macOS via Apple Virtualization Framework |
 
 Available test names: `rauc-slots`, `rauc-update`, `rauc-rollback`, `rauc-confirm`, `rauc-power-loss`, `rauc-watchdog`,
-`firewall`, `network-isolation`, `ssh-wan-toggle`.
+`firewall`, `initrd-fresh-flash-marker`, `first-boot-provision`, `first-boot-source-discovery`, `forensics-podman-log-path`,
+`forensics-rsyslog-path`, `forensics-rsyslog-buffering`, `forensics-shutdown-flush`, `network-isolation`, `ssh-wan-toggle`.
 
 ## Overlay
 

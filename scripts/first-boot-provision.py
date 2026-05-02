@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 import argparse
 import email.policy
+import errno
 import html
 import io
+import ipaddress
 import json
 import os
 import pwd
 import shutil
-import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import textwrap
+import time
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
+
 
 try:
     import tomllib
@@ -26,34 +29,51 @@ except ModuleNotFoundError:
 
 
 DEFAULT_CONFIG_DIR = Path("/data/config")
-CONFIG_DIR_TOKEN = "${CONFIG_DIR}"
-FILES_DIR_TOKEN = "${FILES_DIR}"
+CONFIG_DIR_TOKEN = "${CONFIG_DIR}"  # noqa: S105
+FILES_DIR_TOKEN = "${FILES_DIR}"  # noqa: S105
 GZIP_MAGIC = b"\x1f\x8b"
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+GZIP_BIN = os.environ.get("ATOMICNIX_GZIP", "gzip")
+ZSTD_BIN = os.environ.get("ATOMICNIX_ZSTD", "zstd")
 APP_RUNTIME_USER = "appsvc"
 ROOTLESS_NETWORK_NAME = "pasta"
+BOOTSTRAP_LAN_HOST = "172.20.30.1"
 RUNTIME_METADATA_FILENAME = "quadlet-runtime.json"
 FIREWALL_INBOUND_FILENAME = "firewall-inbound.json"
+LAN_SETTINGS_FILENAME = "lan-settings.json"
 CONTAINER_SUFFIX = ".container"
 QUADLET_SUFFIXES = {".build", ".container", ".image", ".kube", ".network", ".pod", ".volume"}
+BOOTSTRAP_LOGO_PATH = Path(__file__).resolve().parent.parent / "share" / "atomicnix" / "atomicnix.png"
+DEFAULT_LAN_GATEWAY_CIDR = "172.20.30.1/24"
+DEFAULT_LAN_DHCP_START = "172.20.30.10"
+DEFAULT_LAN_DHCP_END = "172.20.30.254"
+DEFAULT_LAN_DOMAIN = "local"
+DEFAULT_LAN_GATEWAY_ALIASES = ["atomicnix"]
+DEFAULT_LAN_HOSTNAME_PATTERN = ""
 
 
 class ProvisionError(RuntimeError):
     pass
 
 
+def provision_error(message: str) -> ProvisionError:
+    return ProvisionError(message)
+
+
 def validate_name(name: str) -> str:
+    message = f"invalid quadlet unit name: {name!r}"
     if not name or "/" in name or "\x00" in name or "." in name or name in {".", ".."}:
-        raise ProvisionError(f"invalid quadlet unit name: {name!r}")
+        raise provision_error(message)
     for char in name:
         if not (char.isalnum() or char in {"_", "-"}):
-            raise ProvisionError(f"invalid quadlet unit name: {name!r}")
+            raise provision_error(message)
     return name
 
 
 def require_mapping(value, path: str):
     if not isinstance(value, dict):
-        raise ProvisionError(f"expected table at {path}")
+        message = f"expected table at {path}"
+        raise provision_error(message)
     return value
 
 
@@ -62,50 +82,162 @@ def require_allowed_keys(value, path: str, allowed: set[str], required: set[str]
     unexpected = set(table) - allowed
     if unexpected:
         keys = ", ".join(sorted(unexpected))
-        raise ProvisionError(f"unsupported keys at {path}: {keys}")
+        message = f"unsupported keys at {path}: {keys}"
+        raise provision_error(message)
 
     if required is not None:
         missing = required - set(table)
         if missing:
             keys = ", ".join(sorted(missing))
-            raise ProvisionError(f"missing required keys at {path}: {keys}")
+            message = f"missing required keys at {path}: {keys}"
+            raise provision_error(message)
 
     return table
 
 
 def require_string(value, path: str):
     if not isinstance(value, str) or not value.strip():
-        raise ProvisionError(f"expected non-empty string at {path}")
+        message = f"expected non-empty string at {path}"
+        raise provision_error(message)
     return value.strip()
 
 
 def require_string_list(value, path: str):
     if not isinstance(value, list) or not value:
-        raise ProvisionError(f"expected non-empty array at {path}")
+        message = f"expected non-empty array at {path}"
+        raise provision_error(message)
     result = []
     for idx, item in enumerate(value):
         if not isinstance(item, str) or not item.strip():
-            raise ProvisionError(f"expected non-empty string at {path}[{idx}]")
+            message = f"expected non-empty string at {path}[{idx}]"
+            raise provision_error(message)
+        result.append(item.strip())
+    return result
+
+
+def require_optional_string_list(value, path: str):
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        message = f"expected array at {path}"
+        raise provision_error(message)
+
+    result = []
+    for idx, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            message = f"expected non-empty string at {path}[{idx}]"
+            raise provision_error(message)
         result.append(item.strip())
     return result
 
 
 def require_bool(value, path: str):
     if not isinstance(value, bool):
-        raise ProvisionError(f"expected boolean at {path}")
+        message = f"expected boolean at {path}"
+        raise provision_error(message)
     return value
 
 
 def require_port_list(value, path: str):
     if not isinstance(value, list) or not value:
-        raise ProvisionError(f"expected non-empty array at {path}")
+        message = f"expected non-empty array at {path}"
+        raise provision_error(message)
 
     ports = []
     for idx, item in enumerate(value):
         if not isinstance(item, int) or isinstance(item, bool) or item < 1 or item > 65535:
-            raise ProvisionError(f"expected port integer in range 1..65535 at {path}[{idx}]")
+            message = f"expected port integer in range 1..65535 at {path}[{idx}]"
+            raise provision_error(message)
         ports.append(item)
     return ports
+
+
+def require_dns_name(value, path: str):
+    name = require_string(value, path).lower().rstrip(".")
+    if not name:
+        message = f"expected non-empty string at {path}"
+        raise provision_error(message)
+
+    labels = name.split(".")
+    invalid_name_message = f"invalid DNS name at {path}: {value!r}"
+    for label in labels:
+        if not label or len(label) > 63:
+            raise provision_error(invalid_name_message)
+        if not label[0].isalnum() or not label[-1].isalnum():
+            raise provision_error(invalid_name_message)
+        for char in label:
+            if not (char.isalnum() or char == "-"):
+                raise provision_error(invalid_name_message)
+    return name
+
+
+def load_lan_settings(lan_value, path: str = "lan"):
+    if lan_value is None:
+        lan_value = {}
+
+    lan = require_allowed_keys(
+        lan_value,
+        path,
+        {"gateway_cidr", "dhcp_start", "dhcp_end", "domain", "hostname_pattern", "gateway_aliases"},
+    )
+
+    gateway_cidr = require_string(lan.get("gateway_cidr", DEFAULT_LAN_GATEWAY_CIDR), f"{path}.gateway_cidr")
+    try:
+        gateway = ipaddress.IPv4Interface(gateway_cidr)
+    except ValueError as exc:
+        message = f"invalid IPv4 CIDR at {path}.gateway_cidr: {gateway_cidr}"
+        raise provision_error(message) from exc
+    if gateway.network.prefixlen != 24:
+        message = f"{path}.gateway_cidr must use a /24 subnet"
+        raise provision_error(message)
+
+    dhcp_start_raw = require_string(lan.get("dhcp_start", DEFAULT_LAN_DHCP_START), f"{path}.dhcp_start")
+    dhcp_end_raw = require_string(lan.get("dhcp_end", DEFAULT_LAN_DHCP_END), f"{path}.dhcp_end")
+    try:
+        dhcp_start = ipaddress.IPv4Address(dhcp_start_raw)
+        dhcp_end = ipaddress.IPv4Address(dhcp_end_raw)
+    except ValueError as exc:
+        message = f"invalid IPv4 address in {path}.dhcp_start or {path}.dhcp_end"
+        raise provision_error(message) from exc
+
+    if dhcp_start not in gateway.network or dhcp_end not in gateway.network:
+        message = f"{path}.dhcp_start and {path}.dhcp_end must be inside {gateway.network}"
+        raise provision_error(message)
+    if dhcp_start > dhcp_end:
+        message = f"{path}.dhcp_start must be less than or equal to {path}.dhcp_end"
+        raise provision_error(message)
+    if dhcp_start == gateway.ip or dhcp_end == gateway.ip:
+        message = f"{path}.dhcp_start and {path}.dhcp_end must not equal the gateway IP"
+        raise provision_error(message)
+
+    domain = require_dns_name(lan.get("domain", DEFAULT_LAN_DOMAIN), f"{path}.domain")
+    hostname_pattern = require_string(
+        lan.get("hostname_pattern", DEFAULT_LAN_HOSTNAME_PATTERN) or DEFAULT_LAN_HOSTNAME_PATTERN,
+        f"{path}.hostname_pattern",
+    ) if lan.get("hostname_pattern") not in (None, "") else DEFAULT_LAN_HOSTNAME_PATTERN
+    if hostname_pattern:
+        if "{mac}" not in hostname_pattern:
+            message = f"{path}.hostname_pattern must include {{mac}}"
+            raise provision_error(message)
+        pattern_probe = hostname_pattern.replace("{mac}", "001122334455")
+        require_dns_name(pattern_probe, f"{path}.hostname_pattern")
+
+    gateway_aliases = require_optional_string_list(lan.get("gateway_aliases"), f"{path}.gateway_aliases")
+    if not gateway_aliases:
+        gateway_aliases = list(DEFAULT_LAN_GATEWAY_ALIASES)
+    gateway_aliases = [require_dns_name(alias, f"{path}.gateway_aliases") for alias in gateway_aliases]
+
+    return {
+        "gateway_cidr": str(gateway),
+        "gateway_ip": str(gateway.ip),
+        "subnet_cidr": str(gateway.network),
+        "netmask": str(gateway.netmask),
+        "dhcp_start": str(dhcp_start),
+        "dhcp_end": str(dhcp_end),
+        "domain": domain,
+        "hostname_pattern": hostname_pattern,
+        "gateway_aliases": list(dict.fromkeys(gateway_aliases)),
+    }
 
 
 def ensure_dir(path: Path):
@@ -128,7 +260,8 @@ def format_scalar(value):
         return str(value)
     if isinstance(value, str):
         return value
-    raise ProvisionError(f"unsupported scalar value type: {type(value).__name__}")
+    message = f"unsupported scalar value type: {type(value).__name__}"
+    raise provision_error(message)
 
 
 def substitute_tokens(value: str, config_root: Path):
@@ -147,8 +280,9 @@ def normalize_directives(directives_table: dict, path: str):
         normalized_values = []
         for idx, value in enumerate(values):
             item_path = f"{path}.{key}[{idx}]" if isinstance(raw_value, list) else f"{path}.{key}"
-            if isinstance(value, list) or isinstance(value, dict):
-                raise ProvisionError(f"expected scalar value at {item_path}")
+            if isinstance(value, (list, dict)):
+                message = f"expected scalar value at {item_path}"
+                raise provision_error(message)
             normalized_values.append(value)
         normalized[key] = normalized_values
     return normalized
@@ -197,7 +331,8 @@ def render_containers(container_table: dict, config_root: Path):
     warnings = []
 
     if not container_table:
-        raise ProvisionError("container must define at least one container")
+        message = "container must define at least one container"
+        raise provision_error(message)
 
     for container_name, raw_sections in container_table.items():
         validate_name(container_name)
@@ -216,7 +351,8 @@ def render_containers(container_table: dict, config_root: Path):
 
         image_values = container_directives.get("Image")
         if image_values is None or len(image_values) != 1:
-            raise ProvisionError(f"{container_path}.Container.Image must be a single string value")
+            message = f"{container_path}.Container.Image must be a single string value"
+            raise provision_error(message)
         require_string(image_values[0], f"{container_path}.Container.Image")
 
         if privileged:
@@ -229,7 +365,8 @@ def render_containers(container_table: dict, config_root: Path):
         else:
             if "Network" in container_directives:
                 warnings.append(
-                    f"container.{container_name}.Container.Network overridden to {ROOTLESS_NETWORK_NAME} for rootless container"
+                    f"container.{container_name}.Container.Network overridden to "
+                    f"{ROOTLESS_NETWORK_NAME} for rootless container"
                 )
             container_directives["Network"] = [ROOTLESS_NETWORK_NAME]
             publish_ports = container_directives.get("PublishPort", [])
@@ -276,18 +413,20 @@ def load_config(config_path: Path, config_root: Path = DEFAULT_CONFIG_DIR):
     try:
         data = tomllib.loads(config_path.read_text())
     except tomllib.TOMLDecodeError as exc:
-        raise ProvisionError(f"invalid TOML in {config_path}: {exc}") from exc
+        message = f"invalid TOML in {config_path}: {exc}"
+        raise provision_error(message) from exc
 
     root = require_allowed_keys(
         data,
         "config",
-        {"version", "admin", "firewall", "health", "container"},
+        {"version", "admin", "firewall", "health", "lan", "container"},
         {"version", "admin", "firewall", "health", "container"},
     )
 
     version = root.get("version")
     if not isinstance(version, int) or isinstance(version, bool) or version != 1:
-        raise ProvisionError("version must be integer 1")
+        message = "version must be integer 1"
+        raise provision_error(message)
 
     admin = require_allowed_keys(root.get("admin"), "admin", {"ssh_keys"}, {"ssh_keys"})
     ssh_keys = require_string_list(admin.get("ssh_keys"), "admin.ssh_keys")
@@ -299,7 +438,8 @@ def load_config(config_path: Path, config_root: Path = DEFAULT_CONFIG_DIR):
         {"tcp", "udp"},
     )
     if "tcp" not in inbound and "udp" not in inbound:
-        raise ProvisionError("firewall.inbound must define tcp and/or udp")
+        message = "firewall.inbound must define tcp and/or udp"
+        raise provision_error(message)
     firewall_inbound = {}
     if "tcp" in inbound:
         firewall_inbound["tcp"] = require_port_list(inbound.get("tcp"), "firewall.inbound.tcp")
@@ -309,18 +449,23 @@ def load_config(config_path: Path, config_root: Path = DEFAULT_CONFIG_DIR):
     health = require_allowed_keys(root.get("health"), "health", {"required"}, {"required"})
     required_units = require_string_list(health.get("required"), "health.required")
 
+    lan_settings = load_lan_settings(root.get("lan"))
+
     container = require_mapping(root.get("container"), "container")
     rendered_units, runtime_units, warnings = render_containers(container, config_root)
     if not rendered_units:
-        raise ProvisionError("config.toml must define at least one Quadlet unit")
+        message = "config.toml must define at least one Quadlet unit"
+        raise provision_error(message)
 
     for unit in required_units:
         if unit not in container:
-            raise ProvisionError(f"health.required references unknown unit: {unit}")
+            message = f"health.required references unknown unit: {unit}"
+            raise provision_error(message)
 
     return {
         "ssh_keys": ssh_keys,
         "firewall_inbound": firewall_inbound,
+        "lan_settings": lan_settings,
         "required_units": required_units,
         "rendered_units": rendered_units,
         "runtime": {
@@ -344,7 +489,34 @@ def detect_bundle_kind(source_bytes: bytes, filename: str = ""):
 def validate_bundle_member(name: str):
     path = Path(name)
     if path.is_absolute() or ".." in path.parts or name in {"", "."}:
-        raise ProvisionError(f"invalid bundle member path: {name!r}")
+        message = f"invalid bundle member path: {name!r}"
+        raise provision_error(message)
+
+
+def generated_required_units(quadlet: str):
+    snippet = quadlet.strip()
+    if not snippet:
+        message = "container TOML snippet is required"
+        raise provision_error(message)
+
+    try:
+        parsed = tomllib.loads(snippet)
+    except tomllib.TOMLDecodeError as exc:
+        message = f"invalid container TOML snippet: {exc}"
+        raise provision_error(message) from exc
+
+    container = parsed.get("container")
+    if not isinstance(container, dict) or not container:
+        message = "container TOML snippet must define at least one [container.<name>] table"
+        raise provision_error(message)
+
+    return [validate_name(name) for name in container]
+
+
+def uploaded_config_text(payload: bytes, filename: str):
+    if detect_bundle_kind(payload, filename) is not None:
+        return ""
+    return payload.decode("utf-8", errors="replace")
 
 
 def extract_bundle_archive(source_bytes: bytes, filename: str, destination: Path):
@@ -352,70 +524,78 @@ def extract_bundle_archive(source_bytes: bytes, filename: str, destination: Path
     if bundle_kind == "tar.gz":
         try:
             decompressed = subprocess.run(
-                ["gzip", "-dc"],
+                [GZIP_BIN, "-dc"],
                 input=source_bytes,
                 capture_output=True,
                 check=True,
             ).stdout
         except FileNotFoundError as exc:
-            raise ProvisionError("gzip is required to import .tar.gz bundles") from exc
+            message = "gzip is required to import .tar.gz bundles"
+            raise provision_error(message) from exc
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.decode("utf-8", errors="replace").strip()
             detail = f": {stderr}" if stderr else ""
-            raise ProvisionError(f"failed to decompress .tar.gz bundle{detail}") from exc
-        archive = tarfile.open(fileobj=io.BytesIO(decompressed), mode="r:")
+            message = f"failed to decompress .tar.gz bundle{detail}"
+            raise provision_error(message) from exc
     elif bundle_kind == "tar.zst":
         try:
             decompressed = subprocess.run(
-                ["zstd", "-dcq"],
+                [ZSTD_BIN, "-dcq"],
                 input=source_bytes,
                 capture_output=True,
                 check=True,
             ).stdout
         except FileNotFoundError as exc:
-            raise ProvisionError("zstd is required to import .tar.zst bundles") from exc
+            message = "zstd is required to import .tar.zst bundles"
+            raise provision_error(message) from exc
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.decode("utf-8", errors="replace").strip()
             detail = f": {stderr}" if stderr else ""
-            raise ProvisionError(f"failed to decompress .tar.zst bundle{detail}") from exc
-        archive = tarfile.open(fileobj=io.BytesIO(decompressed), mode="r:")
+            message = f"failed to decompress .tar.zst bundle{detail}"
+            raise provision_error(message) from exc
     else:
-        raise ProvisionError("supported bundle formats are .tar.gz, .tgz, .tar.zst, and .tzst")
+        message = "supported bundle formats are .tar.gz, .tgz, .tar.zst, and .tzst"
+        raise provision_error(message)
 
-    with archive:
+    with tarfile.open(fileobj=io.BytesIO(decompressed), mode="r:") as archive:
         for member in archive.getmembers():
             validate_bundle_member(member.name)
             target = destination / member.name
             if member.isdir():
                 ensure_dir(target)
-                os.chmod(target, 0o755)
+                target.chmod(0o755)
                 continue
             if not member.isfile():
-                raise ProvisionError(f"unsupported bundle member type: {member.name}")
+                message = f"unsupported bundle member type: {member.name}"
+                raise provision_error(message)
 
             ensure_dir(target.parent)
             extracted = archive.extractfile(member)
             if extracted is None:
-                raise ProvisionError(f"failed to read bundle member: {member.name}")
+                message = f"failed to read bundle member: {member.name}"
+                raise provision_error(message)
             with extracted, target.open("wb") as output:
                 shutil.copyfileobj(extracted, output)
-            os.chmod(target, 0o644)
+            target.chmod(0o644)
 
 
 def validate_bundle_layout(bundle_root: Path):
     allowed_entries = {"config.toml", "files"}
     actual_entries = {entry.name for entry in bundle_root.iterdir()}
     if "config.toml" not in actual_entries:
-        raise ProvisionError("bundle must contain config.toml at the top level")
+        message = "bundle must contain config.toml at the top level"
+        raise provision_error(message)
 
     unexpected = actual_entries - allowed_entries
     if unexpected:
         names = ", ".join(sorted(unexpected))
-        raise ProvisionError(f"bundle contains unsupported top-level entries: {names}")
+        message = f"bundle contains unsupported top-level entries: {names}"
+        raise provision_error(message)
 
     files_dir = bundle_root / "files"
     if files_dir.exists() and not files_dir.is_dir():
-        raise ProvisionError("bundle entry 'files' must be a directory")
+        message = "bundle entry 'files' must be a directory"
+        raise provision_error(message)
 
 
 def prepare_bundle_from_bytes(source_bytes: bytes, filename: str = ""):
@@ -433,7 +613,8 @@ def prepare_source_path(source_path: Path):
     source_bytes = source_path.read_bytes()
     bundle_kind = detect_bundle_kind(source_bytes, source_path.name)
     if bundle_kind is None:
-        raise ProvisionError("supported import inputs are config.toml, .tar.gz/.tgz, and .tar.zst/.tzst")
+        message = "supported import inputs are config.toml, .tar.gz/.tgz, and .tar.zst/.tzst"
+        raise provision_error(message)
     return prepare_bundle_from_bytes(source_bytes, source_path.name)
 
 
@@ -459,12 +640,12 @@ def copy_bundle_files(files_source: Path | None, config_root: Path):
         destination = target / relative
         if source.is_dir():
             ensure_dir(destination)
-            os.chmod(destination, 0o755)
+            destination.chmod(0o755)
             continue
 
         ensure_dir(destination.parent)
         shutil.copyfile(source, destination)
-        os.chmod(destination, 0o644)
+        destination.chmod(0o644)
 
 
 def write_imported_state(parsed: dict, prepared_config: Path, prepared_files: Path | None, config_root: Path):
@@ -474,24 +655,28 @@ def write_imported_state(parsed: dict, prepared_config: Path, prepared_files: Pa
 
     imported_path = config_root / "config.toml"
     shutil.copyfile(prepared_config, imported_path)
-    os.chmod(imported_path, 0o600)
+    imported_path.chmod(0o600)
 
     ssh_path = config_root / "ssh-authorized-keys" / "admin"
     ssh_path.write_text("\n".join(parsed["ssh_keys"]) + "\n")
-    os.chmod(ssh_path, 0o600)
+    ssh_path.chmod(0o600)
     maybe_chown_user(ssh_path, "admin")
 
     health_path = config_root / "health-required.json"
     health_path.write_text(json.dumps(parsed["required_units"], indent=2) + "\n")
-    os.chmod(health_path, 0o600)
+    health_path.chmod(0o600)
 
     firewall_path = config_root / FIREWALL_INBOUND_FILENAME
     firewall_path.write_text(json.dumps(parsed["firewall_inbound"], indent=2) + "\n")
-    os.chmod(firewall_path, 0o600)
+    firewall_path.chmod(0o600)
+
+    lan_settings_path = config_root / LAN_SETTINGS_FILENAME
+    lan_settings_path.write_text(json.dumps(parsed["lan_settings"], indent=2) + "\n")
+    lan_settings_path.chmod(0o600)
 
     runtime_path = config_root / RUNTIME_METADATA_FILENAME
     runtime_path.write_text(json.dumps(parsed["runtime"], indent=2) + "\n")
-    os.chmod(runtime_path, 0o600)
+    runtime_path.chmod(0o600)
 
     quadlet_dir = config_root / "quadlet"
     for existing in quadlet_dir.iterdir():
@@ -500,7 +685,7 @@ def write_imported_state(parsed: dict, prepared_config: Path, prepared_files: Pa
     for filename, content in parsed["rendered_units"].items():
         unit_path = quadlet_dir / filename
         unit_path.write_text(content)
-        os.chmod(unit_path, 0o644)
+        unit_path.chmod(0o644)
 
     copy_bundle_files(prepared_files, config_root)
 
@@ -508,15 +693,18 @@ def write_imported_state(parsed: dict, prepared_config: Path, prepared_files: Pa
 def load_runtime_metadata(config_root: Path):
     metadata_path = config_root / RUNTIME_METADATA_FILENAME
     if not metadata_path.exists():
-        raise ProvisionError(f"missing runtime metadata: {metadata_path}")
+        message = f"missing runtime metadata: {metadata_path}"
+        raise provision_error(message)
 
     try:
         metadata = json.loads(metadata_path.read_text())
     except json.JSONDecodeError as exc:
-        raise ProvisionError(f"invalid runtime metadata in {metadata_path}: {exc}") from exc
+        message = f"invalid runtime metadata in {metadata_path}: {exc}"
+        raise provision_error(message) from exc
 
     if not isinstance(metadata, dict) or not isinstance(metadata.get("units"), list):
-        raise ProvisionError(f"invalid runtime metadata structure in {metadata_path}")
+        message = f"invalid runtime metadata structure in {metadata_path}"
+        raise provision_error(message)
     return metadata
 
 
@@ -547,11 +735,13 @@ def sync_quadlet_units(config_root: Path, rootful_target: Path, rootless_target:
     units_by_mode = {"rootful": set(), "rootless": set()}
     for unit in metadata["units"]:
         if not isinstance(unit, dict):
-            raise ProvisionError("invalid runtime unit entry")
+            message = "invalid runtime unit entry"
+            raise provision_error(message)
         filename = unit.get("filename")
         mode = unit.get("mode")
         if not isinstance(filename, str) or mode not in units_by_mode:
-            raise ProvisionError("invalid runtime unit metadata")
+            message = "invalid runtime unit metadata"
+            raise provision_error(message)
         units_by_mode[mode].add(filename)
 
     ensure_dir(rootful_target)
@@ -563,14 +753,15 @@ def sync_quadlet_units(config_root: Path, rootful_target: Path, rootless_target:
     for filename in desired_rootful:
         unit_file = source / filename
         shutil.copyfile(unit_file, rootful_target / filename)
-        os.chmod(rootful_target / filename, 0o644)
+        (rootful_target / filename).chmod(0o644)
 
     for stale in existing_rootful - desired_rootful:
         (rootful_target / stale).unlink()
 
     if rootless_target is None:
         if units_by_mode["rootless"]:
-            raise ProvisionError("rootless target path is required when rootless units are present")
+            message = "rootless target path is required when rootless units are present"
+            raise provision_error(message)
         return
 
     ensure_dir(rootless_target)
@@ -582,7 +773,7 @@ def sync_quadlet_units(config_root: Path, rootful_target: Path, rootless_target:
     for filename in desired_rootless:
         unit_file = source / filename
         shutil.copyfile(unit_file, rootless_target / filename)
-        os.chmod(rootless_target / filename, 0o644)
+        (rootless_target / filename).chmod(0o644)
 
     for stale in existing_rootless - desired_rootless:
         (rootless_target / stale).unlink()
@@ -592,40 +783,239 @@ BOOTSTRAP_HTML = """<!doctype html>
 <html>
   <head>
     <meta charset=\"utf-8\">
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
     <title>AtomicNix Bootstrap</title>
     <style>
-      body {{ font-family: sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem; }}
-      textarea {{ width: 100%; min-height: 18rem; font-family: monospace; }}
-      label {{ display: block; margin-top: 1rem; }}
-      button {{ margin-top: 1rem; padding: 0.5rem 1rem; }}
-      .note {{ color: #444; }}
+      :root {{
+        color-scheme: dark;
+        --bg: #06102a;
+        --panel: rgba(11, 26, 58, 0.88);
+        --panel-border: rgba(93, 121, 168, 0.34);
+        --fg: #d4e6ff;
+        --muted: #c3dbff;
+        --link: #61b3ff;
+        --accent: #4ea3ff;
+        --accent-strong: #2f7fe0;
+        --input: rgba(10, 22, 50, 0.9);
+        --input-border: rgba(124, 183, 255, 0.28);
+        --shadow: rgba(0, 0, 0, 0.35);
+      }}
+      * {{ box-sizing: border-box; }}
+      body {{
+        margin: 0;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+        color: var(--fg);
+        background:
+          radial-gradient(circle at 16% 8%, rgba(76, 146, 255, 0.2), transparent 36%),
+          radial-gradient(circle at 86% 0%, rgba(50, 107, 206, 0.2), transparent 30%),
+          var(--bg);
+      }}
+      main {{
+        max-width: 60rem;
+        margin: 0 auto;
+        padding: 1.5rem 1rem 2rem;
+      }}
+      .hero {{
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+        gap: 0.85rem;
+        margin-bottom: 1.5rem;
+      }}
+      .hero-mark {{
+        width: min(19rem, 68vw);
+        height: auto;
+        filter: drop-shadow(0 12px 28px rgba(0, 0, 0, 0.34));
+      }}
+      .hero h1 {{
+        margin: 0;
+        font-size: clamp(1.8rem, 4vw, 2.7rem);
+        letter-spacing: 0.02em;
+        color: #e7f3ff;
+      }}
+      .hero p {{
+        margin: 0;
+        max-width: 44rem;
+        color: var(--muted);
+        line-height: 1.6;
+      }}
+      .grid {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+        gap: 1rem;
+      }}
+      .panel {{
+        background: var(--panel);
+        border: 1px solid var(--panel-border);
+        border-radius: 14px;
+        box-shadow: 0 18px 54px var(--shadow);
+        padding: 1rem;
+        backdrop-filter: blur(8px);
+      }}
+      .panel h2 {{
+        margin: 0 0 0.35rem;
+        font-size: 1.15rem;
+        color: #e7f3ff;
+      }}
+      .panel p {{
+        margin: 0 0 0.75rem;
+        color: var(--muted);
+        line-height: 1.5;
+      }}
+      label {{
+        display: block;
+        margin-top: 0.9rem;
+        margin-bottom: 0.35rem;
+        color: #e7f3ff;
+        font-weight: 600;
+      }}
+      input[type=file], textarea {{
+        width: 100%;
+        border-radius: 10px;
+        border: 1px solid var(--input-border);
+        background: var(--input);
+        color: var(--fg);
+        padding: 0.8rem 0.9rem;
+        font: inherit;
+      }}
+      textarea {{
+        min-height: 18rem;
+        resize: vertical;
+        font-family: ui-monospace, SFMono-Regular, SFMono-Regular, Menlo, Consolas, monospace;
+      }}
+      .short {{ min-height: 6rem; }}
+      .medium {{ min-height: 8rem; }}
+      button {{
+        margin-top: 1rem;
+        border: 1px solid rgba(124, 183, 255, 0.45);
+        border-radius: 999px;
+        background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+        color: #f4f9ff;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 700;
+        padding: 0.75rem 1.15rem;
+        box-shadow: 0 10px 24px rgba(26, 73, 150, 0.35);
+      }}
+      button:hover, button:focus-visible {{
+        filter: brightness(1.08);
+      }}
+      a {{
+        color: var(--link);
+        text-underline-offset: 0.14em;
+      }}
+      code {{
+        color: #c6defe;
+        background: rgba(33, 70, 130, 0.34);
+        border: 1px solid rgba(86, 141, 226, 0.32);
+        border-radius: 0.4rem;
+        padding: 0.08rem 0.35rem;
+      }}
+      .message {{
+        margin-top: 1rem;
+        background: rgba(13, 26, 56, 0.88);
+        border: 1px solid rgba(86, 141, 226, 0.28);
+        border-radius: 12px;
+        padding: 0.9rem 1rem;
+      }}
+      .message p {{ margin: 0; }}
+      .message-actions {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin-top: 0.75rem;
+      }}
+      @media (max-width: 640px) {{
+        main {{ padding: 1rem 0.75rem 1.5rem; }}
+        .panel {{ padding: 0.85rem; }}
+      }}
     </style>
+    <script>
+      function downloadAppliedConfig() {{
+        const textarea = document.querySelector('textarea[name="config"]');
+        if (!textarea) {{
+          return;
+        }}
+
+        const blob = new Blob([textarea.value], {{ type: 'text/plain;charset=utf-8' }});
+        const href = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = href;
+        link.download = 'config.toml';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(href);
+      }}
+    </script>
   </head>
   <body>
-    <h1>AtomicNix Bootstrap</h1>
-    <p class=\"note\">Upload an existing <code>config.toml</code>, <code>config.tar.gz</code>, or <code>config.tar.zst</code> bundle as a file or paste a plain <code>config.toml</code> below, or fill the basic form to generate one.</p>
-    <form method=\"post\" action=\"/apply\" enctype=\"multipart/form-data\">
-      <label>Config file or bundle</label>
-      <input type=\"file\" name=\"config_file\" accept=\".toml,.tar.gz,.tgz,.tar.zst,.tzst,text/plain,application/gzip,application/zstd,application/octet-stream\">
-      <label>config.toml</label>
-      <textarea name=\"config\">{config_text}</textarea>
-      <button type=\"submit\">Apply configuration</button>
-    </form>
-    <hr>
-    <form method=\"post\" action=\"/generate\">
-      <label>Admin SSH keys (one per line)</label>
-      <textarea name=\"ssh_keys\" style=\"min-height:8rem\"></textarea>
-      <label>WAN TCP ports (one per line)</label>
-      <textarea name=\"wan_tcp\" style=\"min-height:6rem\">443</textarea>
-      <label>WAN UDP ports (one per line)</label>
-      <textarea name=\"wan_udp\" style=\"min-height:6rem\">1194</textarea>
-      <label>Required health units (one per line)</label>
-      <textarea name=\"required\" style=\"min-height:6rem\"></textarea>
-      <label>Container TOML snippet</label>
-      <textarea name=\"quadlet\">[container.myapp]\nprivileged = false\n\n[container.myapp.Unit]\nDescription = \"My App\"\n\n[container.myapp.Container]\nImage = \"ghcr.io/example/myapp:latest\"\nPublishPort = [\"10080:8080\"]\n\n[container.myapp.Install]\nWantedBy = [\"default.target\"]\n</textarea>
-      <button type=\"submit\">Generate config.toml</button>
-    </form>
-    {message}
+    <main>
+      <section class=\"hero\">
+        <img class=\"hero-mark\" src=\"/assets/atomicnix.png\" alt=\"AtomicNix logo\">
+        <h1>Bootstrap Console</h1>
+        <p>
+          Import an existing <code>config.toml</code>, <code>config.tar.gz</code>, or
+          <code>config.tar.zst</code> bundle, or build a fresh configuration with the guided form below.
+        </p>
+      </section>
+      <section class=\"grid\">
+        <form class=\"panel\" method=\"post\" action=\"/apply\" enctype=\"multipart/form-data\">
+          <h2>Apply Existing Configuration</h2>
+          <p>Upload a prepared config or paste a plain <code>config.toml</code> payload.</p>
+          <label>Config file or bundle</label>
+          <input
+            type=\"file\"
+            name=\"config_file\"
+            accept=\".toml,.tar.gz,.tgz,.tar.zst,.tzst,text/plain,application/gzip,application/zstd,application/octet-stream\"
+          >
+          <label>config.toml</label>
+          <textarea name=\"config\">{config_text}</textarea>
+          <button type=\"submit\">Apply configuration</button>
+        </form>
+        <form class=\"panel\" method=\"post\" action=\"/generate\">
+          <h2>Generate New Configuration</h2>
+          <p>Build a valid AtomicNix bootstrap config for operator access and provisioned containers.</p>
+          <label>Admin SSH keys (one per line)</label>
+          <textarea class=\"medium\" name=\"ssh_keys\"></textarea>
+          <label>WAN TCP ports (one per line)</label>
+          <textarea class=\"short\" name=\"wan_tcp\">443</textarea>
+          <label>WAN UDP ports (one per line)</label>
+          <textarea class=\"short\" name=\"wan_udp\">1194</textarea>
+          <label>LAN gateway CIDR</label>
+          <textarea class=\"short\" name=\"gateway_cidr\">172.20.30.1/24</textarea>
+          <label>LAN DHCP start</label>
+          <textarea class=\"short\" name=\"dhcp_start\">172.20.30.10</textarea>
+          <label>LAN DHCP end</label>
+          <textarea class=\"short\" name=\"dhcp_end\">172.20.30.254</textarea>
+          <label>LAN default domain</label>
+          <textarea class=\"short\" name=\"lan_domain\">local</textarea>
+          <label>Gateway aliases (one per line)</label>
+          <textarea class=\"short\" name=\"gateway_aliases\">atomicnix</textarea>
+          <label>Gateway hostname pattern</label>
+          <textarea class=\"short\" name=\"hostname_pattern\">atomicnix-{{mac}}</textarea>
+          <label>Required health units (one per line)</label>
+          <textarea class=\"short\" name=\"required\"></textarea>
+          <label>Container TOML snippet</label>
+          <textarea name=\"quadlet\">[container.myapp]
+privileged = false
+
+[container.myapp.Unit]
+Description = \"My App\"
+
+[container.myapp.Container]
+Image = \"ghcr.io/example/myapp:latest\"
+PublishPort = [\"10080:8080\"]
+
+[container.myapp.Install]
+WantedBy = [\"default.target\"]
+</textarea>
+          <button type=\"submit\">Generate config.toml</button>
+        </form>
+      </section>
+      {message_block}
+    </main>
   </body>
 </html>
 """
@@ -646,6 +1036,7 @@ class BootstrapHandler(BaseHTTPRequestHandler):
         try:
             parsed = load_config(prepared_config, Path(self.config_root))
             write_imported_state(parsed, prepared_config, prepared_files, Path(self.config_root))
+            return prepared_config.read_text()
         finally:
             temp_bundle.cleanup()
 
@@ -680,7 +1071,8 @@ class BootstrapHandler(BaseHTTPRequestHandler):
         return {k: v[-1] for k, v in parse_qs(body.decode(), keep_blank_values=True).items()}
 
     def _send_html(self, config_text="", message=""):
-        body = BOOTSTRAP_HTML.format(config_text=html.escape(config_text), message=message)
+        message_block = f'<section class="message">{message}</section>' if message else ""
+        body = BOOTSTRAP_HTML.format(config_text=html.escape(config_text), message_block=message_block)
         body_bytes = body.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -697,6 +1089,20 @@ class BootstrapHandler(BaseHTTPRequestHandler):
         self.wfile.write(body_bytes)
 
     def do_GET(self):
+        request = urlparse(self.path)
+        if request.path == "/assets/atomicnix.png":
+            if not BOOTSTRAP_LOGO_PATH.is_file():
+                self.send_error(404)
+                return
+
+            body = BOOTSTRAP_LOGO_PATH.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self._send_html()
 
     def do_POST(self):
@@ -706,7 +1112,7 @@ class BootstrapHandler(BaseHTTPRequestHandler):
             filename = self.headers.get("X-Config-Filename", "config.toml")
             try:
                 self._write_payload(payload, filename)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._send_json(400, {"ok": False, "error": str(exc)})
                 return
 
@@ -715,66 +1121,116 @@ class BootstrapHandler(BaseHTTPRequestHandler):
             return
 
         form = self._read_form()
-        if self.path == "/apply":
-            uploaded = form.get("config_file")
-            if isinstance(uploaded, dict) and uploaded.get("body"):
-                payload = uploaded["body"]
-                filename = uploaded.get("filename", "config.toml")
-                config_text = ""
-            else:
-                config_text = form.get("config", "")
+        config_text = ""
+        try:
+            if self.path == "/apply":
+                uploaded = form.get("config_file")
+                if isinstance(uploaded, dict) and uploaded.get("body"):
+                    payload = uploaded["body"]
+                    filename = uploaded.get("filename", "config.toml")
+                    config_text = uploaded_config_text(payload, filename)
+                else:
+                    config_text = form.get("config", "")
+                    payload = config_text.encode("utf-8")
+                    filename = "config.toml"
+            elif self.path == "/generate":
+                ssh_keys = [line.strip() for line in form.get("ssh_keys", "").splitlines() if line.strip()]
+                tcp_ports = [int(line.strip()) for line in form.get("wan_tcp", "").splitlines() if line.strip()]
+                udp_ports = [int(line.strip()) for line in form.get("wan_udp", "").splitlines() if line.strip()]
+                gateway_cidr = form.get("gateway_cidr", DEFAULT_LAN_GATEWAY_CIDR).strip() or DEFAULT_LAN_GATEWAY_CIDR
+                dhcp_start = form.get("dhcp_start", DEFAULT_LAN_DHCP_START).strip() or DEFAULT_LAN_DHCP_START
+                dhcp_end = form.get("dhcp_end", DEFAULT_LAN_DHCP_END).strip() or DEFAULT_LAN_DHCP_END
+                lan_domain = form.get("lan_domain", DEFAULT_LAN_DOMAIN).strip() or DEFAULT_LAN_DOMAIN
+                gateway_aliases = [
+                    line.strip() for line in form.get("gateway_aliases", "").splitlines() if line.strip()
+                ]
+                hostname_pattern = (
+                    form.get("hostname_pattern", DEFAULT_LAN_HOSTNAME_PATTERN).strip() or DEFAULT_LAN_HOSTNAME_PATTERN
+                )
+                quadlet = form.get("quadlet", "").strip()
+                required = [line.strip() for line in form.get("required", "").splitlines() if line.strip()]
+                if not required:
+                    required = generated_required_units(quadlet)
+                firewall_lines = ["[firewall.inbound]"]
+                if tcp_ports:
+                    firewall_lines.append(f"tcp = {json.dumps(tcp_ports)}")
+                if udp_ports:
+                    firewall_lines.append(f"udp = {json.dumps(udp_ports)}")
+                firewall_text = "\n".join(firewall_lines)
+                lan_lines = [
+                    "[lan]",
+                    f'gateway_cidr = {json.dumps(gateway_cidr)}',
+                    f'dhcp_start = {json.dumps(dhcp_start)}',
+                    f'dhcp_end = {json.dumps(dhcp_end)}',
+                    f'domain = {json.dumps(lan_domain)}',
+                    f'gateway_aliases = {json.dumps(gateway_aliases or DEFAULT_LAN_GATEWAY_ALIASES)}',
+                ]
+                if hostname_pattern:
+                    lan_lines.append(f'hostname_pattern = {json.dumps(hostname_pattern)}')
+                lan_text = "\n".join(lan_lines)
+                config_text = textwrap.dedent(
+                    f"""
+                    version = 1
+
+                    [admin]
+                    ssh_keys = {json.dumps(ssh_keys)}
+
+                    {firewall_text}
+
+                    {lan_text}
+
+                    [health]
+                    required = {json.dumps(required)}
+
+                    {quadlet}
+                    """
+                ).strip() + "\n"
                 payload = config_text.encode("utf-8")
                 filename = "config.toml"
-        elif self.path == "/generate":
-            ssh_keys = [line.strip() for line in form.get("ssh_keys", "").splitlines() if line.strip()]
-            tcp_ports = [int(line.strip()) for line in form.get("wan_tcp", "").splitlines() if line.strip()]
-            udp_ports = [int(line.strip()) for line in form.get("wan_udp", "").splitlines() if line.strip()]
-            required = [line.strip() for line in form.get("required", "").splitlines() if line.strip()]
-            quadlet = form.get("quadlet", "").strip()
-            firewall_lines = ["[firewall.inbound]"]
-            if tcp_ports:
-                firewall_lines.append(f"tcp = {json.dumps(tcp_ports)}")
-            if udp_ports:
-                firewall_lines.append(f"udp = {json.dumps(udp_ports)}")
-            firewall_text = "\n".join(firewall_lines)
-            config_text = textwrap.dedent(
-                f"""
-                version = 1
+            else:
+                self.send_error(404)
+                return
 
-                [admin]
-                ssh_keys = {json.dumps(ssh_keys)}
-
-                {firewall_text}
-
-                [health]
-                required = {json.dumps(required)}
-
-                {quadlet}
-                """
-            ).strip() + "\n"
-            payload = config_text.encode("utf-8")
-            filename = "config.toml"
-        else:
-            self.send_error(404)
-            return
-
-        try:
-            self._write_payload(payload, filename)
-        except Exception as exc:  # noqa: BLE001
+            applied_config = self._write_payload(payload, filename)
+        except Exception as exc:
             self._send_html(config_text=config_text, message=f"<p><strong>Error:</strong> {html.escape(str(exc))}</p>")
             return
 
-        self._send_html(config_text=config_text, message="<p><strong>Configuration applied.</strong></p>")
+        self._send_html(
+            config_text=applied_config,
+            message=(
+                '<p><strong>Configuration applied.</strong> '
+                'Use the button below to save the rendered <code>config.toml</code> directly from this page.</p>'
+                '<div class="message-actions">'
+                '<button type="button" onclick="downloadAppliedConfig()">Download applied config.toml</button>'
+                '</div>'
+            ),
+        )
         self._mark_applied()
 
-    def log_message(self, format, *args):
-        sys.stderr.write("[bootstrap] " + (format % args) + "\n")
+    def log_message(self, fmt, *args):
+        if fmt == '"%s" %s %s' and args:
+            request_line = f"{self.command} {urlparse(self.path).path} {self.request_version}"
+            args = (request_line, *args[1:])
+        sys.stderr.write("[bootstrap] " + (fmt % args) + "\n")
 
 
 def serve_bootstrap(config_root: Path, output_path: Path, host: str, port: int):
     BootstrapHandler.config_root = str(config_root)
     BootstrapHandler.output_path = str(output_path)
-    httpd = ThreadingHTTPServer((host, port), BootstrapHandler)
+    waiting_for_bind = False
+    while True:
+        try:
+            httpd = ThreadingHTTPServer((host, port), BootstrapHandler)
+            break
+        except OSError as exc:
+            if exc.errno == errno.EADDRNOTAVAIL and host == BOOTSTRAP_LAN_HOST:
+                if not waiting_for_bind:
+                    sys.stderr.write(f"[bootstrap] waiting for bootstrap address {host}\n")
+                    waiting_for_bind = True
+                time.sleep(1)
+                continue
+            raise
     httpd.serve_forever()
 
 
@@ -797,7 +1253,7 @@ def main():
     serve_parser = sub.add_parser("serve")
     serve_parser.add_argument("config_root")
     serve_parser.add_argument("output")
-    serve_parser.add_argument("--host", default="0.0.0.0")
+    serve_parser.add_argument("--host", default=BOOTSTRAP_LAN_HOST)
     serve_parser.add_argument("--port", type=int, default=8080)
 
     args = parser.parse_args()

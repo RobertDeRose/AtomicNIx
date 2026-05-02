@@ -21,7 +21,7 @@ software alone.
 
 ```sh
 # Flash with mise
-mise run build:image
+mise run build
 mise run flash /dev/diskN
 
 # Or with dd directly
@@ -171,7 +171,7 @@ From a device on the **LAN** side:
 
 ```sh
 # From LAN (172.20.30.x)
-ssh admin@172.20.30.1                # expect: connection accepted (key or password)
+ssh admin@172.20.30.1                # expect: key-based connection accepted
 nmap -p 22,67,123 172.20.30.1       # expect: all open
 ```
 
@@ -242,15 +242,44 @@ good.
 ### Task 18.4 -- Provisioned credentials work
 
 ```sh
-# SSH key auth (from your workstation, WAN or LAN)
+# SSH key auth (from your workstation on the LAN)
 ssh -i ~/.ssh/id_ed25519 admin@172.20.30.1    # expect: logged in, no password prompt
 
-# Password auth via Cockpit (from browser)
-# Navigate to https://172.20.30.1
-# Login with admin + provisioned password       # expect: Cockpit dashboard
+# Password auth should remain disabled
+auth_line="$({ ssh -vv -o PreferredAuthentications=none -o PubkeyAuthentication=no \
+  -o BatchMode=yes -o NumberOfPasswordPrompts=0 \
+  -o StrictHostKeyChecking=accept-new \
+  -o UserKnownHostsFile=/tmp/atomicnix-rock64-known_hosts \
+  -o ConnectTimeout=10 admin@172.20.30.1 true; } \
+  2>&1 | grep 'Authentications that can continue:' | tail -n 1)"
+[ -n "$auth_line" ] && ! printf '%s\n' "$auth_line" | grep -Fq 'password'
 ```
 
-**Pass criteria**: SSH key auth works from LAN. Password auth works via Cockpit pod on localhost.
+**Pass criteria**: SSH key auth works from LAN. The auth-method probe exits
+successfully, which confirms the advertised methods exclude `password`.
+
+```sh
+# `_RUT_OH_` should remain a serial-only recovery path, not a normal login path
+fw_setenv _RUT_OH_ 1
+reboot
+# On UART2/ttyS2 at 1500000 baud, expect serial root autologin on the next boot
+# and no change to SSH login behavior. After boot completes, from your
+# workstation on the LAN:
+ssh -i ~/.ssh/id_ed25519 admin@172.20.30.1    # expect: still works
+auth_line="$({ ssh -vv -o PreferredAuthentications=none -o PubkeyAuthentication=no \
+  -o BatchMode=yes -o NumberOfPasswordPrompts=0 \
+  -o StrictHostKeyChecking=accept-new \
+  -o UserKnownHostsFile=/tmp/atomicnix-rock64-known_hosts \
+  -o ConnectTimeout=10 admin@172.20.30.1 true; } \
+  2>&1 | grep 'Authentications that can continue:' | tail -n 1)"
+[ -n "$auth_line" ] && ! printf '%s\n' "$auth_line" | grep -Fq 'password'
+
+# On the device:
+fw_printenv -n _RUT_OH_    # expect: empty / unset
+```
+
+**Pass criteria**: `_RUT_OH_` only enables the one-shot serial recovery path,
+clears itself after use, and does not change SSH behavior on the network.
 
 ---
 

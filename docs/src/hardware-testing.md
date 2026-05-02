@@ -37,21 +37,23 @@ screen /dev/tty.usbserial-DM02496T 1500000
 - `bootflow scan` finds `boot.scr` on boot-a
 - Kernel loads and prints boot messages
 - System reaches `multi-user.target`
-- `first-boot.service` runs and marks slot as good
+- If `/boot/config.toml` or a USB seed is present, `first-boot.service` completes provisioning
+- Without a seed, the bootstrap UI appears on `172.20.30.1:8080` and first boot waits for operator input
 
 ### Test 1.2: Verify first-boot service
 
 ```sh
 systemctl status first-boot
-cat /data/.completed_first_boot
-rauc status
+[ -f /data/.completed_first_boot ] && cat /data/.completed_first_boot
+[ -x "$(command -v rauc)" ] && rauc status
 ```
 
 **Pass criteria**:
 
-- `first-boot.service` completed successfully
-- Sentinel file exists at `/data/.completed_first_boot`
-- RAUC shows the booted slot as "good"
+- With a seed config present, `first-boot.service` completed successfully
+- Without a seed config, the bootstrap UI is reachable and `first-boot.service` remains waiting
+- After provisioning succeeds, the sentinel exists at `/data/.completed_first_boot`
+- On RAUC-enabled images, `rauc status` shows the booted slot as "good" after provisioning succeeds
 
 ## Phase 2: Kernel & Hardware Detection
 
@@ -218,12 +220,51 @@ journalctl -u os-verification -f
 ```sh
 # From an external machine on the LAN
 ssh -i ~/.ssh/id_ed25519 admin@172.20.30.1
+
+# Password auth should remain disabled
+auth_line="$({ ssh -vv -o PreferredAuthentications=none -o PubkeyAuthentication=no \
+  -o BatchMode=yes -o NumberOfPasswordPrompts=0 \
+  -o StrictHostKeyChecking=accept-new \
+  -o UserKnownHostsFile=/tmp/atomicnix-rock64-known_hosts \
+  -o ConnectTimeout=10 admin@172.20.30.1 true; } \
+  2>&1 | grep 'Authentications that can continue:' | tail -n 1)"
+[ -n "$auth_line" ] && ! printf '%s\n' "$auth_line" | grep -Fq 'password'
 ```
 
 **Pass criteria**:
 
 - Key-based authentication succeeds
-- Password authentication is rejected by default
+- The auth-method probe exits successfully, confirming `password` is excluded
+
+### Test 6.2: Serial root recovery
+
+```sh
+# On the device
+fw_setenv _RUT_OH_ 1
+reboot
+
+# `_RUT_OH_` should remain a serial-only recovery path
+# On UART2/ttyS2 at 1500000 baud, expect serial root autologin on the next boot.
+
+# From an external machine on the LAN after the reboot
+ssh -i ~/.ssh/id_ed25519 admin@172.20.30.1
+auth_line="$({ ssh -vv -o PreferredAuthentications=none -o PubkeyAuthentication=no \
+  -o BatchMode=yes -o NumberOfPasswordPrompts=0 \
+  -o StrictHostKeyChecking=accept-new \
+  -o UserKnownHostsFile=/tmp/atomicnix-rock64-known_hosts \
+  -o ConnectTimeout=10 admin@172.20.30.1 true; } \
+  2>&1 | grep 'Authentications that can continue:' | tail -n 1)"
+[ -n "$auth_line" ] && ! printf '%s\n' "$auth_line" | grep -Fq 'password'
+
+# On the device after boot completes
+fw_printenv -n _RUT_OH_    # expect: empty / unset
+```
+
+**Pass criteria**:
+
+- `_RUT_OH_` enables one-shot serial root autologin on UART2 only
+- SSH behavior on the network is unchanged after the recovery boot
+- `_RUT_OH_` is cleared after use
 
 ## Phase 7: RAUC Update Lifecycle
 
@@ -303,24 +344,23 @@ kill -STOP 1
 
 ## Task Checklist
 
-| #   | Test                         | Status |
-|-----|------------------------------|--------|
-| 1.1 | Flash + U-Boot output        |        |
-| 1.2 | First-boot service           |        |
-| 2.1 | eMMC + core hardware         |        |
-| 2.2 | WiFi + Bluetooth modules     |        |
-| 3.1 | eth0 is onboard              |        |
-| 3.2 | DHCP server on LAN           |        |
-| 3.3 | NTP server on LAN            |        |
-| 3.4 | LAN isolation                |        |
-| 4.1 | WAN port access              |        |
-| 4.2 | SSH-on-WAN toggle            |        |
-| 5.1 | Cockpit pod                  |        |
-| 5.2 | Health manifest confirmation |        |
-| 6.1 | SSH key auth                 |        |
-| 6.2 | Serial root recovery         |        |
-| 7.1 | RAUC status                  |        |
-| 7.2 | Bundle install               |        |
-| 7.3 | Boot-count rollback          |        |
-| 8.1 | Watchdog presence            |        |
-| 8.2 | Watchdog reboot              |        |
+| #   | Test                     | Status |
+|-----|--------------------------|--------|
+| 1.1 | Flash + U-Boot output    |        |
+| 1.2 | First-boot service       |        |
+| 2.1 | eMMC + core hardware     |        |
+| 2.2 | WiFi + Bluetooth modules |        |
+| 3.1 | eth0 is onboard          |        |
+| 3.2 | DHCP server on LAN       |        |
+| 3.3 | NTP server on LAN        |        |
+| 3.4 | LAN isolation            |        |
+| 4.1 | WAN port access          |        |
+| 4.2 | SSH-on-WAN toggle        |        |
+| 5.1 | Update confirmation      |        |
+| 6.1 | SSH key auth             |        |
+| 6.2 | Serial root recovery     |        |
+| 7.1 | RAUC status              |        |
+| 7.2 | Bundle install           |        |
+| 7.3 | Boot-count rollback      |        |
+| 8.1 | Watchdog presence        |        |
+| 8.2 | Watchdog reboot          |        |

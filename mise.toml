@@ -1,4 +1,3 @@
-# schema
 [settings]
 experimental = true
 env_shell_expand = true
@@ -15,6 +14,7 @@ mdbook = "0.5.2"
 "npm:markdown-table-formatter" = "1.7.0"
 pkl = "0.31.1"
 rumdl = "0.1.69"
+ruff = "0.15.12"
 shellcheck = "0.11.0"
 shfmt = "3.13.1"
 tombi = "0.9.16"
@@ -109,9 +109,11 @@ run = """
 #!/usr/bin/env bash
 set -euo pipefail
 cmd=()
+using_lima=false
 if [ "${usage_lima:-false}" = "true" ]; then
   mise run _lima "${usage_vm}"
   cmd+=(limactl shell "${usage_vm}" --)
+  using_lima=true
 fi
 
 GCROOTS=.gcroots
@@ -131,6 +133,7 @@ if [ -L "$IMGROOT/image.1" ]; then
   prev_image_target=$(readlink "$IMGROOT/image.1")
 fi
 
+"${cmd[@]}" rm -f "$IMGROOT/image.1.new"
 "${cmd[@]}" nix build .#image -o "$IMGROOT/image.1.new"
 new_image_target=$(readlink "$IMGROOT/image.1.new")
 
@@ -142,22 +145,47 @@ fi
 "${cmd[@]}" rm -f "$IMGROOT/image.1"
 "${cmd[@]}" mv "$IMGROOT/image.1.new" "$IMGROOT/image.1"
 
-"${cmd[@]}" rm -f "$BUNDLEROOT/rauc-bundle.2"
-"${cmd[@]}" test ! -L "$BUNDLEROOT/rauc-bundle.1" || mv "$BUNDLEROOT/rauc-bundle.1" "$BUNDLEROOT/rauc-bundle.2"
+prev_bundle_target=""
+if [ -L "$BUNDLEROOT/rauc-bundle.1" ]; then
+  prev_bundle_target=$(readlink "$BUNDLEROOT/rauc-bundle.1")
+fi
+
+"${cmd[@]}" rm -f "$BUNDLEROOT/rauc-bundle.1.new"
+"${cmd[@]}" nix build .#rauc-bundle -o "$BUNDLEROOT/rauc-bundle.1.new"
+new_bundle_target=$(readlink "$BUNDLEROOT/rauc-bundle.1.new")
+
+if [ -n "$prev_bundle_target" ] && [ "$prev_bundle_target" != "$new_bundle_target" ]; then
+  "${cmd[@]}" rm -f "$BUNDLEROOT/rauc-bundle.2"
+  "${cmd[@]}" mv "$BUNDLEROOT/rauc-bundle.1" "$BUNDLEROOT/rauc-bundle.2"
+fi
+
 "${cmd[@]}" rm -f "$BUNDLEROOT/rauc-bundle.1"
-"${cmd[@]}" nix build .#rauc-bundle -o "$BUNDLEROOT/rauc-bundle.1"
+"${cmd[@]}" mv "$BUNDLEROOT/rauc-bundle.1.new" "$BUNDLEROOT/rauc-bundle.1"
 
 IMG=$("${cmd[@]}" sh -c 'set -- "$1"/*.img; [ -e "$1" ] && printf "%s\n" "$1"' _ "$IMGROOT/image.1")
 
 if [ -n "${usage_output:-}" ]; then
   DEST="${usage_output}"
-  "${cmd[@]}" cp "$IMG" "$PWD/$DEST"
-  chmod u+w "$PWD/$DEST"
-  SIZE=$(stat -c%s "$DEST" 2>/dev/null || stat -f%z "$DEST")
+  if [ "${DEST#/}" != "$DEST" ]; then
+    DEST_PATH="$DEST"
+  else
+    DEST_PATH="$PWD/$DEST"
+  fi
+  if [ "$using_lima" = "true" ]; then
+    "${cmd[@]}" sh -c 'cat "$1"' _ "$IMG" >"$DEST_PATH"
+  else
+    cp "$IMG" "$DEST_PATH"
+  fi
+  chmod u+w "$DEST_PATH"
+  SIZE=$(stat -c%s "$DEST_PATH" 2>/dev/null || stat -f%z "$DEST_PATH")
   echo ""
-  echo "Image: $DEST ($((SIZE / 1024 / 1024)) MiB)"
+  echo "Image: $DEST_PATH ($((SIZE / 1024 / 1024)) MiB)"
 else
-  SIZE=$(stat -c%s "$IMG" 2>/dev/null || stat -f%z "$IMG")
+  if [ "$using_lima" = "true" ]; then
+    SIZE=$("${cmd[@]}" sh -c 'stat -c%s "$1" 2>/dev/null || stat -f%z "$1"' _ "$IMG")
+  else
+    SIZE=$(stat -c%s "$IMG" 2>/dev/null || stat -f%z "$IMG")
+  fi
   echo ""
   echo "Image: $IMG ($((SIZE / 1024 / 1024)) MiB)"
 fi

@@ -7,37 +7,24 @@ set -euo pipefail
 
 SUSTAIN_DURATION="${ATOMICNIX_VERIFICATION_SUSTAIN_DURATION:-60}"
 CHECK_INTERVAL="${ATOMICNIX_VERIFICATION_CHECK_INTERVAL:-5}"
-FORENSICS_STATE_DIR="${ATOMICNIX_FORENSICS_RAUC_STATE_DIR:-/data/rauc/forensics}"
 HEALTH_REQUIRED_FILE="/data/config/health-required.json"
+LAN_SETTINGS_FILE="/data/config/lan-settings.json"
 
 log() { echo "[os-verification] $*"; }
 
-forensic() {
-	if command -v forensic-log >/dev/null 2>&1; then
-		forensic-log "$@" || true
+read_gateway_ip() {
+	if [ ! -f "$LAN_SETTINGS_FILE" ]; then
+		printf '%s\n' '172.20.30.1'
+		return 0
 	fi
-}
-
-clear_pending_slot_state() {
-	rm -f \
-		"$FORENSICS_STATE_DIR/pending-source-slot" \
-		"$FORENSICS_STATE_DIR/pending-target-slot" \
-		"$FORENSICS_STATE_DIR/pending-target-version" \
-		"$FORENSICS_STATE_DIR/pending-target-booted"
+	jq -r '.gateway_ip // "172.20.30.1"' "$LAN_SETTINGS_FILE"
 }
 
 read_required_units() {
 	if [ ! -f "$HEALTH_REQUIRED_FILE" ]; then
 		return 0
 	fi
-	python3 - <<'PY'
-import json
-from pathlib import Path
-
-path = Path("/data/config/health-required.json")
-for item in json.loads(path.read_text()):
-    print(item)
-PY
+	jq -r '.[]' "$HEALTH_REQUIRED_FILE"
 }
 
 current_boot_slot() {
@@ -62,20 +49,14 @@ if [ -z "$SLOT_STATUS" ]; then
 	BOOT_SLOT="$(current_boot_slot || true)"
 	if [ -z "$BOOT_SLOT" ]; then
 		log "Could not determine boot slot from /proc/cmdline"
-		forensic --stage verify --event failed --reason missing-boot-slot
 		exit 1
 	fi
 	log "Assuming first boot, marking good: $BOOT_SLOT"
-	forensic --stage verify --event start --slot "$BOOT_SLOT"
-	forensic --stage rauc --event mark-good-start --slot "$BOOT_SLOT"
 	if rauc status mark-good "$BOOT_SLOT"; then
-		forensic --stage rauc --event mark-good-complete --slot "$BOOT_SLOT" --result ok
-		clear_pending_slot_state
-		forensic --stage verify --event complete --slot "$BOOT_SLOT" --result ok
+		log "Slot marked good during fallback verification path"
 		exit 0
 	fi
-	forensic --stage rauc --event mark-good-failed --slot "$BOOT_SLOT" --reason initial-boot
-	forensic --stage verify --event failed --slot "$BOOT_SLOT" --reason mark-good-failed
+	log "Failed to mark slot good during fallback verification path"
 	exit 1
 fi
 
@@ -88,17 +69,15 @@ BOOT_GOOD=$(printf '%s\n' "$RAUC_STATUS_JSON" | jq -r '
 ' 2>/dev/null || true)
 if [ "$BOOT_GOOD" = "good" ]; then
 	log "Slot already marked good, nothing to do"
-	forensic --stage verify --event complete --result already-good
 	exit 0
 fi
 
 log "Slot is pending confirmation, running health checks..."
 BOOT_SLOT="$(current_boot_slot || true)"
 if [ -z "$BOOT_SLOT" ]; then
-	forensic --stage verify --event failed --reason missing-boot-slot
+	log "Could not determine boot slot from /proc/cmdline"
 	exit 1
 fi
-forensic --stage verify --event start --slot "$BOOT_SLOT"
 
 # ── Step 2: System health checks ──
 check_service() {
@@ -127,18 +106,18 @@ else
 	SYSTEM_OK=false
 fi
 
-# Check eth1 is 172.20.30.1 (LAN)
+# Check eth1 is the configured LAN gateway IP
+EXPECTED_ETH1_IP="$(read_gateway_ip)"
 ETH1_IP=$(ip -4 addr show eth1 2>/dev/null | grep -oP 'inet \K[\d.]+' || true)
-if [ "$ETH1_IP" = "172.20.30.1" ]; then
-	log "  OK eth1 is 172.20.30.1"
+if [ "$ETH1_IP" = "$EXPECTED_ETH1_IP" ]; then
+	log "  OK eth1 is $EXPECTED_ETH1_IP"
 else
-	log "  FAIL eth1 is not 172.20.30.1 (got: $ETH1_IP)"
+	log "  FAIL eth1 is not $EXPECTED_ETH1_IP (got: $ETH1_IP)"
 	SYSTEM_OK=false
 fi
 
 if [ "$SYSTEM_OK" != "true" ]; then
 	log "FAIL: System health checks failed"
-	forensic --stage verify --event failed --slot "$BOOT_SLOT" --reason system-health
 	exit 1
 fi
 
@@ -151,7 +130,6 @@ while IFS= read -r required_unit; do
 		log "  OK ${required_unit}.service is active"
 	else
 		log "  FAIL ${required_unit}.service is NOT active"
-		forensic --stage verify --event failed --slot "$BOOT_SLOT" --reason provisioned-health
 		exit 1
 	fi
 done < <(read_required_units)
@@ -167,7 +145,6 @@ while [ "$ELAPSED" -lt "$SUSTAIN_DURATION" ]; do
 	# Check system services still up
 	if ! systemctl is-active --quiet "dnsmasq.service" 2>/dev/null; then
 		log "FAIL: dnsmasq stopped during sustained check"
-		forensic --stage verify --event failed --slot "$BOOT_SLOT" --reason sustained-check
 		exit 1
 	fi
 
@@ -175,7 +152,6 @@ while [ "$ELAPSED" -lt "$SUSTAIN_DURATION" ]; do
 		[ -n "$required_unit" ] || continue
 		if ! systemctl is-active --quiet "${required_unit}.service" 2>/dev/null; then
 			log "FAIL: ${required_unit}.service stopped during sustained check"
-			forensic --stage verify --event failed --slot "$BOOT_SLOT" --reason sustained-check
 			exit 1
 		fi
 	done < <(read_required_units)
@@ -187,20 +163,14 @@ log "Sustained health check passed (${SUSTAIN_DURATION}s)"
 BOOT_SLOT="$(current_boot_slot || true)"
 if [ -z "$BOOT_SLOT" ]; then
 	log "Could not determine boot slot from /proc/cmdline"
-	forensic --stage verify --event failed --reason missing-boot-slot
 	exit 1
 fi
 
 log "All checks passed, marking slot as good: $BOOT_SLOT"
-forensic --stage rauc --event mark-good-start --slot "$BOOT_SLOT"
 if rauc status mark-good "$BOOT_SLOT"; then
-	forensic --stage rauc --event mark-good-complete --slot "$BOOT_SLOT" --result ok
-	clear_pending_slot_state
-	forensic --stage verify --event complete --slot "$BOOT_SLOT" --result ok
 	log "Slot committed successfully"
 	exit 0
 fi
 
-forensic --stage rauc --event mark-good-failed --slot "$BOOT_SLOT" --reason health-check
-forensic --stage verify --event failed --slot "$BOOT_SLOT" --reason mark-good-failed
+log "Failed to mark slot good after successful health checks"
 exit 1
