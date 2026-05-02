@@ -24,6 +24,7 @@ local linters = new Mapping<String, Step> {
     check_diff = "rumdl check --config .config/rumdl.toml --diff {{ files }}"
     fix = "rumdl check --config .config/rumdl.toml --fix {{ files }}"
   }
+  ["ruff"] = Builtins.ruff
   ["newlines"] = Builtins.newlines
   ["nixfmt"] = Builtins.nix_fmt
   ["pkl_format"] = Builtins.pkl_format
