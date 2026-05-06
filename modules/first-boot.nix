@@ -30,9 +30,6 @@ let
   ubootEnvTools = self.packages.${pkgs.stdenv.hostPlatform.system}.uboot-env-tools;
   firstBootEnv = {
     ATOMICNIX_RAUC_ENABLE = if config.atomicnix.rauc.enable then "1" else "0";
-  }
-  // lib.optionalAttrs developmentMode {
-    ATOMICNIX_DEV_ENABLE_SSH_WAN = "1";
   };
 in
 {
