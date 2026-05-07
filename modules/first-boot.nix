@@ -26,6 +26,7 @@ let
     mkdir -p "$out/bin" "$out/share/atomicnix"
     install -m0755 ${../scripts/first-boot-provision.py} "$out/bin/first-boot-provision"
     install -m0644 ${../docs/src/atomicnix.png} "$out/share/atomicnix/atomicnix.png"
+    install -m0644 ${../schemas/config.schema.json} "$out/share/atomicnix/config.schema.json"
   '';
   ubootEnvTools = self.packages.${pkgs.stdenv.hostPlatform.system}.uboot-env-tools;
   firstBootEnv = {
