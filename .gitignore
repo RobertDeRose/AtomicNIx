@@ -37,3 +37,4 @@ bkup/
 
 # AtomicNix files
 config.toml
+!example/**/config.toml
